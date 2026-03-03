@@ -15,14 +15,19 @@ hedis analyze [flags]
 
 The analyze command supports two primary modes:
 
-### 1. Database Analysis (Coming Soon)
+### 1. Database Analysis (Currently Disabled)
 
-Compare an IPA or HBC file against the fingerprint database:
+Direct IPA or HBC file analysis against the fingerprint database is currently disabled in the codebase. This functionality is commented out pending further development.
 
 ```bash
-hedis analyze -i app.ipa
-hedis analyze -b index.android.bundle
+# These flags exist but the functionality is not active
+hedis analyze -i app.ipa        # Not currently functional
+hedis analyze -b index.android.bundle  # Not currently functional
 ```
+
+<Note>
+  Use the **packages** command with `-d` flag for database-backed analysis, or use **specific analysis** mode (below) for direct comparison.
+</Note>
 
 ### 2. Specific Analysis
 
