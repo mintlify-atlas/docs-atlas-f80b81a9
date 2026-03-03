@@ -1,0 +1,209 @@
+---
+title: IR Normalization
+description: Intermediate representation normalization levels for Hermes bytecode
+---
+
+Hedis generates three types of intermediate representations (IRs) from disassembled Hermes bytecode. These IRs enable both exact matching (via SHA256 hashing) and fuzzy similarity detection (via MinHash and LSH) for identifying vulnerable package code.
+
+## Overview
+
+The normalization process extracts different aspects of function bytecode:
+
+| IR Type | Focus | Use Case |
+|---------|-------|----------|
+| **Structural IR** | Instruction sequences | Control-flow shape matching |
+| **Content IR1** | Non-identifier strings | Literal value matching |
+| **Content IR2** | Identifiers & objects | API and structure matching |
+
+All three IRs are generated simultaneously by the `ToIR()` method in `pkg/hbc/types/functionobject.go:144`.
+
+## Normalization Levels
+
+### Level 0: No Normalization
+
+Raw bytecode disassembly without any IR generation. Used for direct inspection.
+
+```bash
+hermes-decompiler disassemble -i bundle.hbc -n 0
+```
+
+### Level 1: Content IR1 (Non-Identifier Strings)
+
+Extracts and normalizes non-identifier string literals from the bytecode.
+
+<ResponseField name="Input" type="FunctionObject">
+  Resolved instructions with `ResolvedRichData` entries
+</ResponseField>
+
+<ResponseField name="Process" type="algorithm">
+  1. Extract all `STRING` type entries where `IsIdentifier = false`
+  2. Convert to lowercase
+  3. Strip pipe characters (`|`)
+  4. Sort alphabetically
+  5. Join with pipe delimiter
+</ResponseField>
+
+<ResponseField name="Output" type="string">
+  Pipe-delimited, sorted list of lowercased string literals
+</ResponseField>
+
+**Example:**
+
+```javascript
+// Original code
+console.log("Error: Connection failed");
+alert("Warning");
+```
+
+```
+// Content IR1 output
+error: connection failed|warning
+```
+
+**Tokenization for Fuzzy Matching:**
+
+For strings ≥3 characters, trigram shingles are generated:
+
+```
+"error" → ["err", "rro", "ror"]
+```
+
+This enables partial matching via MinHash similarity.
+
+### Level 2: Content IR2 (Identifiers & Objects)
+
+Extracts identifiers and object structures from the bytecode.
+
+<ResponseField name="Input" type="FunctionObject">
+  Resolved instructions with `ResolvedRichData` entries
+</ResponseField>
+
+<ResponseField name="Process" type="algorithm">
+  1. Extract all `STRING` entries where `IsIdentifier = true`
+  2. Extract all `OBJECT` entries where `IsIdentifier = false`
+  3. Convert to lowercase
+  4. Strip pipe characters (`|`)
+  5. Sort alphabetically
+  6. Join with pipe delimiter
+</ResponseField>
+
+<ResponseField name="Output" type="string">
+  Pipe-delimited, sorted list of identifiers and object references
+</ResponseField>
+
+**Example:**
+
+```javascript
+// Original code
+const userConfig = { apiKey: "secret", timeout: 5000 };
+fetch(apiEndpoint);
+```
+
+```
+// Content IR2 output
+apiendpoint|fetch|userconfig|{apikey: string, timeout: number}
+```
+
+**Tokenization:**
+
+Same trigram shingling applies for fuzzy matching.
+
+## Structural IR
+
+The structural IR captures instruction flow independent of concrete values.
+
+<ResponseField name="Input" type="FunctionObject">
+  Sequence of normalized instructions
+</ResponseField>
+
+<ResponseField name="Process" type="algorithm">
+  1. Prepend parameter count: `pc=N|`
+  2. Append each instruction name followed by `|`
+  3. Create bigrams for tokenization: `Inst1→Inst2`
+</ResponseField>
+
+<ResponseField name="Output" type="string">
+  Pipe-delimited sequence of instruction names with parameter count prefix
+</ResponseField>
+
+**Example:**
+
+```javascript
+// Original code
+function add(a, b) { return a + b; }
+```
+
+```
+// Structural IR
+pc=2|LoadParam|LoadParam|Add|Ret|
+
+// Tokenized bigrams for MinHash
+["LoadParam→LoadParam", "LoadParam→Add", "Add→Ret"]
+```
+
+## Implementation Details
+
+### ToIR Method
+
+Source: `pkg/hbc/types/functionobject.go:144`
+
+```go
+func (fo *FunctionObject) ToIR() (structuralIR, contentIR1, contentIR2 string)
+```
+
+### Tokenization Methods
+
+**Structural IR Tokenization:**
+
+Source: `pkg/hbc/types/functionobject.go:71`
+
+```go
+func (fo *FunctionObject) TokenizeStructuralIR() []string
+```
+
+Generates bigrams for MinHash similarity.
+
+**Content IR Tokenization:**
+
+Source: `pkg/hbc/types/functionobject.go:86`
+
+```go
+func (fo *FunctionObject) TokenizeContentIRs() (cir1, cir2 []string)
+```
+
+Generates trigram shingles for strings ≥3 characters.
+
+## Hashing Strategy
+
+Each IR is hashed using SHA256 for exact matching and MinHash for fuzzy similarity:
+
+| Hash Type | Algorithm | Purpose |
+|-----------|-----------|----------|
+| Exact Match | SHA256 | Fast database lookup |
+| Fuzzy Match | MinHash (128 permutations) | Similarity scoring |
+
+Source: `pkg/analyzer/compute.go`
+
+## Use in Analysis
+
+During the `analyze` command, all three IRs are compared:
+
+1. **Exact matching** - SHA256 lookup in MongoDB
+2. **Fuzzy matching** - MinHash Jaccard similarity with threshold (default 0.8)
+3. **Length filtering** - ±20% bytecode size tolerance before comparison
+
+See [Hash Types](/reference/hash-types) for detailed hash implementation.
+
+## Performance Considerations
+
+<ResponseField name="Disk Space" type="optimization">
+  Operand details are excluded from structural IR to reduce storage size
+</ResponseField>
+
+<ResponseField name="Computation" type="optimization">
+  IRs are computed once during disassembly and cached in the database
+</ResponseField>
+
+<ResponseField name="Fuzzy Matching" type="optimization">
+  Trigram shingling increases token count 3x but enables partial string matching
+</ResponseField>

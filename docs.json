@@ -1,122 +1,109 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "Hedis",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#1e40af",
+    "light": "#3b82f6",
+    "dark": "#1e3a8a"
   },
-  "favicon": "/favicon.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/kianhub/hedis"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/kianhub/hedis"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
-              "quickstart",
-              "development"
+              "introduction",
+              "installation",
+              "quickstart"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Core Concepts",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "concepts/hermes-bytecode",
+              "concepts/fingerprinting",
+              "concepts/fuzzy-matching",
+              "concepts/database-schema"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "CLI Commands",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "commands/disassemble",
+              "commands/analyze",
+              "commands/maintain-database",
+              "commands/genopcodes",
+              "commands/packages"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Guides",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "guides/analyzing-apps",
+              "guides/building-database",
+              "guides/opcode-generation",
+              "guides/configuration"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/hbc-reader",
+              "architecture/pipeline",
+              "architecture/analyzer"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "Research",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Academic Context",
             "pages": [
-              "api-reference/introduction"
+              "research/thesis",
+              "research/methodology",
+              "research/validation"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "API Reference",
+            "pages": [
+              "reference/bytecode-versions",
+              "reference/ir-normalization",
+              "reference/hash-types",
+              "reference/environment-variables"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Development",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "development/contributing",
+              "development/troubleshooting"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

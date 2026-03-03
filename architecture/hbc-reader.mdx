@@ -1,0 +1,529 @@
+---
+title: 'HBC Reader Architecture'
+description: 'Deep dive into the Hermes bytecode parser and disassembler'
+---
+
+## Overview
+
+The HBC Reader (`pkg/hbc/`) is the foundational component that parses Hermes bytecode (`.hbc`) files into structured, analyzable representations. It supports **27 bytecode versions** (bcv 61-96) spanning Hermes v0.2.0 through v0.14.0, making it compatible with React Native versions 0.60 through 0.79.
+
+## File Format
+
+### HBC File Structure
+
+Hermes bytecode files follow a strict binary format with a magic number header:
+
+```go
+const HeaderMagic uint64 = 0x1F1903C103BC1FC6 // Unicode 'Ἑρμῆ' (Hermes in Greek)
+```
+
+**File sections (in order):**
+
+```
+┌─────────────────────────────────────┐
+│ Header (variable size, ~80-120 bytes)│
+├─────────────────────────────────────┤
+│ Function Headers (16 or 32 bytes each)│
+├─────────────────────────────────────┤
+│ String Kinds (RLE-encoded)          │
+├─────────────────────────────────────┤
+│ Identifier Hashes                   │
+├─────────────────────────────────────┤
+│ Small String Table                  │
+├─────────────────────────────────────┤
+│ Overflow String Table               │
+├─────────────────────────────────────┤
+│ String Storage (UTF-16 or Latin-1)  │
+├─────────────────────────────────────┤
+│ Array Buffer                        │
+├─────────────────────────────────────┤
+│ Object Keys/Values                  │
+├─────────────────────────────────────┤
+│ BigInt Storage (bcv >= 87)          │
+├─────────────────────────────────────┤
+│ RegExp Storage                      │
+├─────────────────────────────────────┤
+│ CJS Modules                         │
+├─────────────────────────────────────┤
+│ Function Sources (bcv >= 84)        │
+├─────────────────────────────────────┤
+│ Debug Info                          │
+├─────────────────────────────────────┤
+│ SHA1 Footer (bcv >= 75, 20 bytes)   │
+└─────────────────────────────────────┘
+```
+
+### Version-Dependent Fields
+
+Different bytecode versions have different header layouts:
+
+<CodeGroup>
+```go bcv >= 87 (Hermes v0.12.0+)
+type HBCHeader struct {
+    Magic                 uint64
+    Version               uint32
+    SourceHash            [20]byte
+    FileLength            uint32
+    GlobalCodeIndex       uint32
+    FunctionCount         uint32
+    StringKindCount       uint32
+    IdentifierCount       uint32
+    StringCount           uint32
+    OverflowStringCount   uint32
+    StringStorageSize     uint32
+    BigIntCount           uint32 // NEW in bcv 87
+    BigIntStorageSize     uint32 // NEW in bcv 87
+    RegExpCount           uint32
+    RegExpStorageSize     uint32
+    ArrayBufferSize       uint32
+    ObjKeyBufferSize      uint32
+    ObjValueBufferSize    uint32
+    SegmentID             uint32
+    CjsModuleCount        uint32
+    FunctionSourceCount   uint32 // bcv >= 84
+    DebugInfoOffset       uint32
+    // Flags byte (3 bits)
+    StaticBuiltins               bool
+    CjsModulesStaticallyResolved bool
+    HasAsync                     bool
+}
+```
+
+```go bcv 84-86
+// Same as above, but without:
+// - BigIntCount
+// - BigIntStorageSize
+```
+
+```go bcv < 84
+// Same as bcv 84-86, but without:
+// - FunctionSourceCount
+```
+</CodeGroup>
+
+## Core Components
+
+### HBCReader
+
+The central structure that holds all parsed data:
+
+```go pkg/hbc/HBCReader.go
+type HBCReader struct {
+    Header                   HBCHeader
+    FunctionHeaders          []any // SmallFunctionHeader | LargeFunctionHeader
+    FunctionIDToExcHandlers  map[int][]ExceptionHandlerInfo
+    FunctionIDToDebugOffsets map[int]DebugOffsets
+    
+    StringKinds              []StringKind
+    IdentifierHashes         []uint32
+    SmallStringTable         []SmallStringTableEntry
+    OverflowStringTable      []OffsetLengthPair
+    Strings                  []string
+    
+    Arrays       []byte
+    ObjectKeys   []byte
+    ObjectValues []byte
+    BigIntValues []int64
+    
+    RegExpTable   []OffsetLengthPair
+    RegExpStorage *bytes.Reader
+    
+    CjsModules      []any // uint32 | SymbolOffsetPair
+    FunctionSources []FunctionSourceEntry
+    
+    DebugInfoHeader      DebugInfoHeader
+    DebugStringTable     []OffsetLengthPair
+    DebugStringStorage   *bytes.Reader
+    DebugFileRegions     []DebugFileRegion
+    SourcesDataStorage   *bytes.Reader
+    ScopeDescDataStorage *bytes.Reader
+    TextifiedDataStorage *bytes.Reader
+    StringTableStorage   *bytes.Reader
+    
+    FileBuffer *bytes.Reader
+    ParserModule *ParserModule // Version-specific opcode definitions
+}
+```
+
+### Reading Workflow
+
+```go pkg/hbc/HBCReader.go:551
+func (h *HBCReader) ReadWholeFile(file io.ReadSeeker) error {
+    // 1. Load entire file into memory
+    fileData, err := io.ReadAll(file)
+    h.FileBuffer = bytes.NewReader(fileData)
+    
+    // 2. Parse header and verify SHA1 (bcv >= 75)
+    if err := h.ReadHeader(); err != nil {
+        return err
+    }
+    
+    // 3. Initialize version-specific parser module
+    if err := h.InitParserModule(); err != nil {
+        return err
+    }
+    
+    // 4. Parse all sections in order
+    h.ReadFunctions()
+    h.ReadStringKinds()
+    h.ReadIdentifierHashes()
+    h.ReadSmallStringTable()
+    h.ReadOverflowStringTable()
+    h.ReadStringStorage()
+    h.ReadArrays()
+    if h.Header.Version >= 87 {
+        h.ReadBigInts()
+    }
+    h.ReadRegExp()
+    h.ReadCjsModules()
+    if h.Header.Version >= 84 {
+        h.ReadFunctionSources()
+    }
+    h.ReadDebugInfo()
+    
+    return nil
+}
+```
+
+## Function Header Parsing
+
+### Bit-Packed Small Headers
+
+Most functions use a 16-byte compact header with bit-packed fields:
+
+```go pkg/hbc/HBCReader.go:159
+type SmallFunctionHeader struct {
+    Offset                 uint32 // 25 bits (max 33MB bytecode offset)
+    ParamCount             uint8  // 7 bits (max 127 params)
+    BytecodeSizeInBytes    uint16 // 15 bits (max 32KB bytecode)
+    FunctionName           uint32 // 17 bits (string table index)
+    InfoOffset             uint32 // 25 bits (debug info offset)
+    FrameSize              uint8  // 7 bits (max 127 registers)
+    EnvironmentState       uint8
+    HighestReadCacheIndex  uint8
+    HighestWriteCacheIndex uint8
+    ProhibitInvoke         uint8 // 2 bits
+    StrictMode             bool  // 1 bit
+    HasExceptionHandler    bool  // 1 bit
+    HasDebugInfo           bool  // 1 bit
+    Overflowed             bool  // 1 bit - triggers LargeFunctionHeader
+    Unused                 uint8 // 2 bits
+}
+```
+
+<Accordion title="Why bit-packing?">
+  Hermes optimizes file size because mobile apps are size-sensitive. A typical React Native app has 500-2000 functions. At 16 bytes per header, that's 8-32KB for function headers alone. Without bit-packing, headers would be 32+ bytes each, doubling the overhead.
+</Accordion>
+
+### Overflow to Large Headers
+
+When a function's fields exceed bit-packed limits, `Overflowed` is set and the header becomes a 41-bit pointer:
+
+```go
+if header.Overflowed {
+    // Combine offset and infoOffset into 41-bit seek address
+    seekAddress := (header.InfoOffset << 16) | header.Offset
+    // Jump to LargeFunctionHeader at seekAddress
+}
+```
+
+```go pkg/hbc/HBCReader.go:185
+type LargeFunctionHeader struct {
+    Offset                 uint32 // Full 32 bits
+    ParamCount             uint32 // Full 32 bits
+    BytecodeSizeInBytes    uint32 // Full 32 bits (max 4GB)
+    FunctionName           uint32 // Full 32 bits
+    InfoOffset             uint32 // Full 32 bits
+    FrameSize              uint32 // Full 32 bits
+    EnvironmentSize        uint32
+    HighestReadCacheIndex  uint8
+    HighestWriteCacheIndex uint8
+    // Same flags as SmallFunctionHeader
+}
+```
+
+## String Table Design
+
+### Three-Tier String Storage
+
+Strings are stored in a space-efficient three-tier system:
+
+```
+┌──────────────────────┐
+│ SmallStringTable     │ (4 bytes per entry)
+│ [IsUTF16|Offset|Len] │
+└──────────────────────┘
+         │
+         ├─── Length < 0xFF ──→ Direct lookup in StringStorage
+         │
+         └─── Length = 0xFF ──→ Lookup in OverflowStringTable
+                                 └──→ StringStorage
+```
+
+**Small String Table Entry (4 bytes, bit-packed):**
+
+<CodeGroup>
+```go bcv >= 56
+// 32-bit word layout:
+// [1 bit IsUTF16][23 bits Offset][8 bits Length]
+entry := binary.LittleEndian.Uint32(data)
+isUTF16 := (entry & 0x01) == 1
+offset := (entry >> 1) & 0x7FFFFF  // 23 bits
+length := uint8(entry >> 24)        // 8 bits
+```
+
+```go bcv < 56
+// 32-bit word layout:
+// [1 bit IsUTF16][1 bit IsIdentifier][22 bits Offset][8 bits Length]
+isUTF16 := (entry & 0x01) == 1
+isIdentifier := (entry & 0x02) == 2  // Removed in bcv 56
+offset := (entry >> 2) & 0x3FFFFF   // 22 bits
+length := uint8(entry >> 24)         // 8 bits
+```
+</CodeGroup>
+
+**Overflow Handling:**
+
+When `length == 0xFF`, the `offset` field becomes an index into the overflow table:
+
+```go pkg/hbc/HBCReader.go:1158
+if sste.Length == 0xff {
+    overflowIndex := int(sste.Offset)
+    overflowInfo := h.OverflowStringTable[overflowIndex]
+    offset = int64(overflowInfo.Offset)  // Actual offset (32 bits)
+    length = overflowInfo.Length          // Actual length (32 bits)
+}
+```
+
+### UTF-16 Decoding
+
+Strings can be UTF-16LE or Latin-1 (single-byte):
+
+```go pkg/hbc/HBCReader.go:1204
+if isUTF16 {
+    // Read 2 bytes per character
+    uint16Data := make([]uint16, length)
+    for j := uint32(0); j < length; j++ {
+        uint16Data[j] = uint16(stringBytes[j*2]) | uint16(stringBytes[j*2+1])<<8
+    }
+    
+    // Handle surrogate pairs for code points > U+FFFF
+    for j := 0; j < len(uint16Data); j++ {
+        r := rune(uint16Data[j])
+        if r >= 0xD800 && r <= 0xDBFF && j+1 < len(uint16Data) {
+            if surrogate := uint16Data[j+1]; surrogate >= 0xDC00 && surrogate <= 0xDFFF {
+                // Combine high + low surrogates
+                r = (r-0xD800)<<10 | (rune(surrogate) - 0xDC00)
+                j++ // Skip low surrogate
+            }
+        }
+        sb.WriteRune(r)
+    }
+} else {
+    // Latin-1: each byte is a rune
+    for _, b := range stringBytes {
+        sb.WriteRune(rune(b))
+    }
+}
+```
+
+## Bytecode Disassembly
+
+### Version-Specific Opcode Definitions
+
+Hedis supports 6 opcode definition sets, each generated from Hermes source files:
+
+```go pkg/hbc/bytecode_parser.go:243
+func GetParser(bcv int) *ParserModule {
+    parserModuleTable := map[int]*ParserModule{
+        84: {bcv84.OpcodeToInstruction, bcv84.NameToInstruction, bcv84.BuiltinFunctionNames},
+        85: {bcv85.OpcodeToInstruction, bcv85.NameToInstruction, bcv85.BuiltinFunctionNames},
+        89: {bcv89.OpcodeToInstruction, bcv89.NameToInstruction, bcv89.BuiltinFunctionNames},
+        90: {bcv90.OpcodeToInstruction, bcv90.NameToInstruction, bcv90.BuiltinFunctionNames},
+        94: {bcv94.OpcodeToInstruction, bcv94.NameToInstruction, bcv94.BuiltinFunctionNames},
+        96: {bcv96.OpcodeToInstruction, bcv96.NameToInstruction, bcv96.BuiltinFunctionNames},
+    }
+    
+    // Select highest parser version <= bcv
+    // E.g., bcv 92 uses parser 90
+    var maxVersion int
+    for version, module := range parserModuleTable {
+        if version <= bcv && version > maxVersion {
+            maxVersion = version
+            parser = module
+        }
+    }
+    return parser
+}
+```
+
+**Opcode definition generation:**
+
+```bash
+# Download Hermes source definitions for all versions
+sh pkg/utils/download_all.sh
+
+# Generate Go opcode definitions
+go run main.go genopcodes
+```
+
+This creates files like `pkg/hbc/types/opcodes/bcv96/hbc96.go` with:
+
+```go
+var OpcodeToInstruction = map[int]*types.Instruction{
+    0x00: types.NewInstruction("Unreachable", 0x00, []types.OperandType{}),
+    0x01: types.NewInstruction("NewObject", 0x01, []types.OperandType{
+        types.NewOperandType("Reg8", "uint8_t"),
+    }),
+    // ... 200+ more opcodes
+}
+```
+
+### Instruction Parsing
+
+```go pkg/hbc/bytecode_parser.go:292
+func ParseHBCBytecode(functionHeader any, hbcReader *HBCReader) ([]*ParsedInstruction, error) {
+    // 1. Extract function offset and size from header
+    offset := int(header.Offset)
+    bytecodeSizeInBytes := int(header.BytecodeSizeInBytes)
+    
+    // 2. Seek to function bytecode in file
+    hbcReader.FileBuffer.Seek(int64(offset), io.SeekStart)
+    
+    // 3. Read raw bytecode bytes
+    bytecode := make([]byte, bytecodeSizeInBytes)
+    io.ReadFull(hbcReader.FileBuffer, bytecode)
+    
+    // 4. Decode instructions
+    buf := bytes.NewReader(bytecode)
+    for {
+        var opcode byte
+        binary.Read(buf, binary.LittleEndian, &opcode)
+        
+        // Look up instruction definition
+        inst := hbcReader.ParserModule.OpcodeToInstruction[int(opcode)]
+        
+        // Read operands based on instruction definition
+        args := make([]any, len(inst.Operands))
+        for i, operand := range inst.Operands {
+            switch operand.Type.Kind {
+            case "uint8_t":
+                var val uint8
+                binary.Read(buf, binary.LittleEndian, &val)
+                args[i] = uint(val)
+            case "uint16_t":
+                var val uint16
+                binary.Read(buf, binary.LittleEndian, &val)
+                args[i] = uint(val)
+            // ... handle all operand types
+            }
+        }
+        
+        instructions = append(instructions, &ParsedInstruction{
+            Inst:        inst,
+            Args:        args,
+            OriginalPos: currentPos,
+        })
+    }
+    return instructions, nil
+}
+```
+
+## Normalization
+
+The normalizer (`pkg/hbc/normalizer.go`) converts raw instructions into `FunctionObject` IR:
+
+```go
+func CreateFunctionObjects(reader *HBCReader) ([]*types.FunctionObject, error) {
+    fois := make([]*types.FunctionObject, 0)
+    
+    for funcIdx, funcHeader := range reader.FunctionHeaders {
+        // Parse bytecode instructions
+        parsedInsts, _ := ParseHBCBytecode(funcHeader, reader)
+        
+        // Normalize each instruction
+        normalizedInsts := make([]*types.FunctionObjectInstruction, 0)
+        for _, inst := range parsedInsts {
+            foi := &types.FunctionObjectInstruction{
+                Name:     inst.Inst.Name,
+                Operands: make([]string, len(inst.Args)),
+                ResolvedRichData: []types.FunctionResolvedRichData{},
+            }
+            
+            // Resolve operand meanings (StringID, FunctionID, etc.)
+            for i, operand := range inst.Inst.Operands {
+                if operand.Meaning != nil {
+                    switch *operand.Meaning {
+                    case types.StringID:
+                        stringID := int(inst.Args[i].(uint))
+                        stringValue := reader.Strings[stringID]
+                        isIdentifier := reader.StringKinds[stringID] == Identifier
+                        foi.ResolvedRichData = append(foi.ResolvedRichData,
+                            types.FunctionResolvedRichData{
+                                Type:         "STRING",
+                                Value:        stringValue,
+                                IsIdentifier: isIdentifier,
+                            })
+                    }
+                }
+            }
+            normalizedInsts = append(normalizedInsts, foi)
+        }
+        
+        fois = append(fois, &types.FunctionObject{
+            Metadata:     extractMetadata(funcHeader),
+            Instructions: normalizedInsts,
+        })
+    }
+    return fois, nil
+}
+```
+
+## Design Decisions
+
+<Accordion title="Why read the entire file into memory?">
+  **Trade-off:** Memory usage vs. implementation simplicity
+  
+  HBC files are typically 500KB-5MB for production React Native apps. Reading the entire file into a `bytes.Reader` allows:
+  - Random access for overflow string lookups
+  - Simple seeking for function bytecode
+  - No need to manage file handle lifecycle
+  
+  For extremely large files (>50MB), a streaming parser would be needed, but this is rare in practice.
+</Accordion>
+
+<Accordion title="Why store FunctionHeaders as []any?">
+  **Type polymorphism:** Functions can have either `SmallFunctionHeader` (16 bytes) or `LargeFunctionHeader` (32 bytes). Go doesn't have sum types, so `[]any` with type assertions is the pragmatic choice:
+  
+  ```go
+  switch header := functionHeader.(type) {
+  case *SmallFunctionHeader:
+      offset = int(header.Offset)
+  case *LargeFunctionHeader:
+      offset = int(header.Offset)
+  }
+  ```
+  
+  An alternative would be an interface, but it would require wrapper types and add complexity.
+</Accordion>
+
+<Accordion title="Why generate opcode definitions instead of parsing at runtime?">
+  **Build-time vs. runtime trade-off:** Hermes opcode definitions are in C++ header files (`BytecodeList.def`). Parsing C++ at runtime would require a C++ preprocessor in Go. Instead:
+  
+  1. Download Hermes source files for each version
+  2. Parse `.def` files with a custom Go parser (`pkg/utils/bcdefparser.go`)
+  3. Generate Go map literals (`pkg/hbc/types/opcodes/bcvXX/hbcXX.go`)
+  
+  This creates ~200KB of generated code per version, but eliminates runtime parsing complexity.
+</Accordion>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Pipeline Architecture" icon="gears" href="/architecture/pipeline">
+    How fingerprints are generated at scale
+  </Card>
+  <Card title="Analyzer Architecture" icon="magnifying-glass" href="/architecture/analyzer">
+    Fuzzy matching with MinHash
+  </Card>
+</CardGroup>

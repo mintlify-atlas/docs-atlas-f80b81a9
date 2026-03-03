@@ -1,80 +1,285 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quick start
+description: Analyze your first React Native app with Hedis
 ---
 
-## Get started in three steps
+## Overview
 
-Get your documentation site running locally and make your first customization.
+This guide walks you through analyzing a React Native application for vulnerable dependencies using Hedis. You'll learn how to disassemble bytecode, extract fingerprints, and match them against a reference database.
 
-### Step 1: Set up your local environment
+<Steps>
+  <Step title="Get a Hermes bytecode file">
+    You need a `.hbc` file from a React Native app. You can extract one from an iOS app archive (`.ipa`) or compile your own.
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+    ### Option 1: Extract from an IPA
 
-### Step 2: Deploy your changes
+    If you have an `.ipa` file, extract it and locate the bundle file:
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```bash
+    # Extract the IPA (it's a ZIP file)
+    unzip MyApp.ipa -d extracted
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    # Find the Hermes bytecode file
+    find extracted -name "*.hbc" -o -name "index.ios.bundle"
+    ```
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    The bundle file is typically in `Payload/MyApp.app/`.
 
-### Step 3: Go live
+    ### Option 2: Compile your own
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    If you have a React Native project:
+
+    ```bash
+    # Install dependencies
+    cd your-react-native-app
+    npm install
+
+    # Bundle with Metro
+    npx react-native bundle \
+      --platform ios \
+      --dev false \
+      --entry-file index.js \
+      --bundle-output bundle.js
+
+    # Compile with Hermes
+    npx hermesc -emit-binary -out bundle.hbc bundle.js
+    ```
+
+    <Tip>
+      Hermes must be enabled in your React Native project. Check `android/app/build.gradle` or `ios/Podfile` for `enableHermes: true`.
+    </Tip>
+  </Step>
+
+  <Step title="Disassemble the bytecode">
+    Use the `disassemble` command to convert the bytecode to human-readable output:
+
+    ```bash
+    cd go/hermes-decompiler
+    ./hermes-decompiler disassemble -i bundle.hbc -o disassembled.txt
+    ```
+
+    This creates a text file containing:
+    - Header information (Hermes version, function count)
+    - Function definitions with bytecode instructions
+    - String literals and object references
+
+    <CodeGroup>
+
+    ```bash Basic disassembly
+    ./hermes-decompiler disassemble \
+      -i bundle.hbc \
+      -o output.txt
+    ```
+
+    ```bash With strings and objects
+    ./hermes-decompiler disassemble \
+      -i bundle.hbc \
+      -o output.txt \
+      -s \
+      -j
+    ```
+
+    ```bash With function objects and IR
+    ./hermes-decompiler disassemble \
+      -i bundle.hbc \
+      -o output.txt \
+      -z \
+      -r
+    ```
+
+    </CodeGroup>
+
+    ### Disassembly flags
+
+    | Flag | Description |
+    |---|---|
+    | `-i, --hbc` | Input HBC file (required) |
+    | `-o, --output` | Output file path |
+    | `-s, --strings` | Include string table |
+    | `-f, --functions` | Include functions (default: true) |
+    | `-j, --objects` | Include object definitions |
+    | `-z, --function-objects` | Include function objects |
+    | `-r, --function-objects-ir` | Include function IR representations |
+    | `-n, --normalization` | Normalization level (0=none, 1=IR1, 2=IR2) |
+  </Step>
+
+  <Step title="Set up the fingerprint database">
+    Before analyzing apps, you need to build a reference database of package fingerprints.
+
+    ### Generate React Native baselines
+
+    Baselines are fingerprints of empty React Native apps, used to filter out framework functions:
+
+    ```bash
+    ./hermes-decompiler maintain-database -b
+    ```
+
+    This processes each React Native environment in `pipeline/react-natives/` and stores framework fingerprints.
+
+    ### Process npm packages
+
+    Index packages from the React Native directory:
+
+    ```bash
+    ./hermes-decompiler maintain-database -p
+    ```
+
+    This runs a parallel pipeline that:
+    1. Installs each package in all 11 RN environments
+    2. Bundles with Metro and compiles with Hermes
+    3. Extracts function fingerprints
+    4. Stores hashes in MongoDB
+
+    <Warning>
+      Package processing can take several hours depending on the number of packages. Progress is saved to `pipeline_progress.json` and can be resumed.
+    </Warning>
+
+    ### Update security advisories
+
+    Download GitHub Security Advisories for known vulnerabilities:
+
+    ```bash
+    ./hermes-decompiler maintain-database -s
+    ```
+
+    Or download all advisories and their associated packages:
+
+    ```bash
+    ./hermes-decompiler maintain-database -g
+    ```
+  </Step>
+
+  <Step title="Analyze an app bundle">
+    Now you can analyze an app to identify which packages it contains.
+
+    ### Basic analysis
+
+    Analyze a single HBC file against the database:
+
+    ```bash
+    ./hermes-decompiler analyze -b bundle.hbc
+    ```
+
+    This performs exact hash matching against the fingerprint database.
+
+    ### Fuzzy matching
+
+    Enable fuzzy matching to catch packages that have minor differences:
+
+    ```bash
+    ./hermes-decompiler analyze \
+      -b bundle.hbc \
+      -f \
+      -c 0.8
+    ```
+
+    The `-c` flag sets the confidence threshold (0.0–1.0). Higher values require closer matches.
+
+    <Note>
+      Fuzzy matching uses Levenshtein distance with length-based pre-filtering. It's slower but catches packages that have been minified or transformed.
+    </Note>
+
+    ### Compare specific packages
+
+    Compare a specific package directly to an app bundle:
+
+    ```bash
+    ./hermes-decompiler analyze \
+      -s \
+      -p package.hbc \
+      -a app-bundle.hbc \
+      -o results.txt
+    ```
+
+    This generates a detailed comparison report showing:
+    - Exact hash matches (structural, IR1, IR2)
+    - Fuzzy matches with confidence scores
+    - Match percentages for each hash type
+
+    ### Analysis flags
+
+    | Flag | Description |
+    |---|---|
+    | `-b, --hbc-file` | Input HBC file to analyze |
+    | `-f, --fuzzy-matching` | Enable fuzzy matching |
+    | `-c, --confidence-threshold` | Confidence threshold (default: 0.8) |
+    | `-s, --specific-analysis` | Compare specific package to app |
+    | `-p, --specific-package` | Package HBC file |
+    | `-a, --compare-to-app-bundle` | App bundle HBC file |
+    | `-o, --output-file` | Write results to file |
+  </Step>
+
+  <Step title="Interpret the results">
+    Hedis matches functions using three hash types:
+
+    ### Hash types
+
+    1. **Structural Hash** — SHA256 of instruction bigrams (opcode sequences)
+       - Detects code structure patterns
+       - Resistant to variable renaming
+
+    2. **Content IR1 Hash** — SHA256 of non-identifier strings
+       - Matches string literals and constants
+       - Uses trigram shingling for fuzzy matching
+
+    3. **Content IR2 Hash** — SHA256 of identifiers and object references
+       - Matches variable and function names
+       - More sensitive to minification
+
+    ### Understanding match percentages
+
+    - **High match (&gt;70%)** - Package is very likely present
+    - **Medium match (30-70%)** - Partial match, possibly a different version
+    - **Low match (&lt;30%)** - Package may not be present, or heavily modified
+
+    <Tip>
+      Use fuzzy matching with a threshold of 0.8–0.9 for production analysis. Lower thresholds increase false positives.
+    </Tip>
+  </Step>
+</Steps>
+
+## Example workflow
+
+Here's a complete example analyzing a React Native app:
+
+```bash
+# 1. Extract bytecode from IPA
+unzip MyApp.ipa -d extracted
+cp extracted/Payload/MyApp.app/main.jsbundle bundle.hbc
+
+# 2. Disassemble for inspection
+./hermes-decompiler disassemble -i bundle.hbc -o disassembled.txt
+
+# 3. Set up database (first time only)
+./hermes-decompiler maintain-database -b  # Generate baselines
+./hermes-decompiler maintain-database -g  # Download advisories
+
+# 4. Analyze with fuzzy matching
+./hermes-decompiler analyze \
+  -b bundle.hbc \
+  -f \
+  -c 0.85 \
+  -o analysis-results.txt
+
+# 5. Review results
+cat analysis-results.txt
+```
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card
+    title="Commands reference"
+    icon="book"
+    href="/commands/disassemble"
+  >
+    Explore all available commands and options
+  </Card>
+  <Card
+    title="Architecture"
+    icon="diagram-project"
+    href="/architecture/overview"
+  >
+    Learn how Hedis works under the hood
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

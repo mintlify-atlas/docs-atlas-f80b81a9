@@ -1,0 +1,104 @@
+---
+title: Bytecode Versions
+description: Supported Hermes bytecode versions in Hedis
+---
+
+Hedis supports **30 Hermes bytecode versions** ranging from v61 to v96, covering Hermes releases from v0.1.0 through v0.14.0+. Each version has pre-generated opcode definitions that enable accurate disassembly and analysis.
+
+## Supported Versions
+
+The following table lists all bytecode versions with their corresponding opcode packages:
+
+| Bytecode Version | Package Location | Status |
+|-----------------|------------------|--------|
+| v61 | `pkg/hbc/types/opcodes/bcv61` | Supported |
+| v63 | `pkg/hbc/types/opcodes/bcv63` | Supported |
+| v64 | `pkg/hbc/types/opcodes/bcv64` | Supported |
+| v65 | `pkg/hbc/types/opcodes/bcv65` | Supported |
+| v66 | `pkg/hbc/types/opcodes/bcv66` | Supported |
+| v67 | `pkg/hbc/types/opcodes/bcv67` | Supported |
+| v68 | `pkg/hbc/types/opcodes/bcv68` | Supported |
+| v69 | `pkg/hbc/types/opcodes/bcv69` | Supported |
+| v70 | `pkg/hbc/types/opcodes/bcv70` | Supported |
+| v72 | `pkg/hbc/types/opcodes/bcv72` | Supported |
+| v73 | `pkg/hbc/types/opcodes/bcv73` | Supported |
+| v75 | `pkg/hbc/types/opcodes/bcv75` | Supported |
+| v77 | `pkg/hbc/types/opcodes/bcv77` | Supported |
+| v78 | `pkg/hbc/types/opcodes/bcv78` | Supported |
+| v79 | `pkg/hbc/types/opcodes/bcv79` | Supported |
+| v80 | `pkg/hbc/types/opcodes/bcv80` | Supported |
+| v81 | `pkg/hbc/types/opcodes/bcv81` | Supported |
+| v82 | `pkg/hbc/types/opcodes/bcv82` | Supported |
+| v84 | `pkg/hbc/types/opcodes/bcv84` | Registered Parser |
+| v85 | `pkg/hbc/types/opcodes/bcv85` | Registered Parser |
+| v86 | `pkg/hbc/types/opcodes/bcv86` | Supported |
+| v87 | `pkg/hbc/types/opcodes/bcv87` | Supported |
+| v88 | `pkg/hbc/types/opcodes/bcv88` | Supported |
+| v89 | `pkg/hbc/types/opcodes/bcv89` | Registered Parser |
+| v90 | `pkg/hbc/types/opcodes/bcv90` | Registered Parser |
+| v91 | `pkg/hbc/types/opcodes/bcv91` | Supported |
+| v92 | `pkg/hbc/types/opcodes/bcv92` | Supported |
+| v94 | `pkg/hbc/types/opcodes/bcv94` | Registered Parser |
+| v95 | `pkg/hbc/types/opcodes/bcv95` | Supported |
+| v96 | `pkg/hbc/types/opcodes/bcv96` | Registered Parser |
+
+## Version Detection
+
+When Hedis encounters an HBC file, it reads the bytecode version from the file header and selects the appropriate parser using `GetParser()` in `pkg/hbc/bytecode_parser.go:243`.
+
+### Parser Fallback Strategy
+
+Not every bytecode version requires its own parser entry. Hedis uses a fallback strategy:
+
+- The parser selects the **highest registered version** that does not exceed the file's bytecode version
+- For example, a v92 file will use the v90 parser if v92 is not explicitly registered
+- Only versions that introduce meaningful instruction set changes need their own entry
+
+### Registered Parsers
+
+Currently registered parser versions (defined in `parserModuleTable`):
+
+<CodeGroup>
+```go Parser Module Table
+parserModuleTable := map[int]*ParserModule{
+    84: {bcv84.OpcodeToInstruction, bcv84.NameToInstruction, bcv84.BuiltinFunctionNames},
+    85: {bcv85.OpcodeToInstruction, bcv85.NameToInstruction, bcv85.BuiltinFunctionNames},
+    89: {bcv89.OpcodeToInstruction, bcv89.NameToInstruction, bcv89.BuiltinFunctionNames},
+    90: {bcv90.OpcodeToInstruction, bcv90.NameToInstruction, bcv90.BuiltinFunctionNames},
+    94: {bcv94.OpcodeToInstruction, bcv94.NameToInstruction, bcv94.BuiltinFunctionNames},
+    96: {bcv96.OpcodeToInstruction, bcv96.NameToInstruction, bcv96.BuiltinFunctionNames},
+}
+```
+</CodeGroup>
+
+## Version Warnings
+
+Hedis logs warnings for unsupported or future bytecode versions:
+
+<ResponseField name="Ancient Format" type="warning">
+  Files with bytecode version < 72 will trigger a warning:
+  ```
+  Warning: This file uses an ancient Hermes bytecode format, which is not supported [XX].
+  ```
+</ResponseField>
+
+<ResponseField name="Future Format" type="warning">
+  Files with bytecode version > 96 will trigger a warning:
+  ```
+  Warning: This file uses a future Hermes bytecode format, which is not yet supported [XX].
+  ```
+</ResponseField>
+
+## File Format
+
+All Hermes bytecode files begin with the magic number:
+
+```
+0x1F1903C103BC1FC6
+```
+
+The bytecode version immediately follows the magic number in the file header.
+
+## Adding New Versions
+
+To add support for a new bytecode version, see [Contributing](/development/contributing#adding-bytecode-support).

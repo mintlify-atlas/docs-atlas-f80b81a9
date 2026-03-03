@@ -1,0 +1,446 @@
+---
+title: Contributing
+description: Guidelines for contributing to Hedis
+---
+
+Contributions to Hedis are welcome! This guide covers the development workflow, code standards, and how to add support for new Hermes bytecode versions.
+
+## Getting Started
+
+### Prerequisites
+
+- **Go** 1.23 or higher
+- **MongoDB** 4.4 or higher
+- **Node.js** 18+ (for JS utilities)
+- **Git** for version control
+
+### Clone the Repository
+
+```bash
+git clone https://github.com/your-org/hedis.git
+cd hedis
+```
+
+### Set Up Development Environment
+
+1. **Install Go dependencies:**
+
+```bash
+cd go/hermes-decompiler
+go mod download
+```
+
+2. **Install Node.js dependencies:**
+
+```bash
+cd js/dependency-resolver
+npm install
+
+cd ../get-packages
+npm install
+```
+
+3. **Configure environment:**
+
+```bash
+cd go/hermes-decompiler
+cp .env.example .env
+# Edit .env with your MongoDB connection and other settings
+```
+
+4. **Start MongoDB:**
+
+```bash
+# Using Docker
+docker run -d -p 27017:27017 --name hedis-mongo mongo:latest
+
+# Or use local MongoDB
+mongod --dbpath /path/to/data
+```
+
+### Build and Test
+
+```bash
+cd go/hermes-decompiler
+
+# Build
+go build -o hermes-decompiler .
+
+# Run tests
+go test ./...
+
+# Run specific test
+go test ./pkg/analyzer/ -run TestMinHasher
+
+# Run tests with coverage
+go test -cover ./...
+```
+
+## Development Workflow
+
+### 1. Create a Feature Branch
+
+```bash
+git checkout -b feature/your-feature-name
+```
+
+### 2. Make Changes
+
+- Follow the [Code Style](#code-style) guidelines
+- Write tests for new functionality
+- Update documentation as needed
+
+### 3. Run Tests
+
+```bash
+# Run all tests
+go test ./...
+
+# Run with race detection
+go test -race ./...
+
+# Run with verbose output
+go test -v ./...
+```
+
+### 4. Commit Changes
+
+Use clear, descriptive commit messages:
+
+```bash
+git add .
+git commit -m "feat: add support for bytecode version 97"
+```
+
+**Commit message format:**
+
+- `feat:` - New feature
+- `fix:` - Bug fix
+- `docs:` - Documentation changes
+- `refactor:` - Code refactoring
+- `test:` - Adding or updating tests
+- `perf:` - Performance improvements
+
+### 5. Push and Create Pull Request
+
+```bash
+git push origin feature/your-feature-name
+```
+
+Then create a pull request on GitHub.
+
+## Code Style
+
+### Go Code
+
+Follow the [Effective Go](https://go.dev/doc/effective_go) guidelines:
+
+- Use `gofmt` to format code:
+  ```bash
+  gofmt -w .
+  ```
+
+- Use `golint` for linting:
+  ```bash
+  golangci-lint run
+  ```
+
+- Write clear comments for exported functions:
+  ```go
+  // GetParser returns the ParserModule for the given Hermes bytecode version
+  // (bcv). It selects the highest available parser version that does not exceed
+  // bcv, so newer files automatically fall back to the closest older opcode set.
+  func GetParser(bcv int) *ParserModule {
+      // ...
+  }
+  ```
+
+### File Organization
+
+```
+go/hermes-decompiler/
+├── pkg/
+│   ├── hbc/              # HBC parsing and disassembly
+│   ├── analyzer/         # Fingerprinting and matching
+│   ├── database/         # MongoDB operations
+│   ├── pipeline/         # Package processing pipeline
+│   ├── cmd/              # CLI commands
+│   └── utils/            # Utility functions
+├── main.go               # Entry point
+└── go.mod                # Dependencies
+```
+
+## Adding Bytecode Support
+
+To add support for a new Hermes bytecode version (e.g., v97):
+
+### 1. Download Hermes Definitions
+
+Update the download script to include the new version:
+
+```bash
+cd go/hermes-decompiler
+
+# Edit pkg/utils/download_all.sh to add the new version
+# Then run:
+sh pkg/utils/download_all.sh
+```
+
+This fetches the C++ instruction definitions from the [facebook/hermes](https://github.com/facebook/hermes) repository.
+
+### 2. Generate Opcode Package
+
+Run the opcode generator:
+
+```bash
+go run main.go genopcodes
+```
+
+This creates `pkg/hbc/types/opcodes/bcv97/hbc97.go` with:
+- Instruction definitions
+- Opcode-to-instruction maps
+- Builtin function names
+
+### 3. Register the Parser
+
+Edit `pkg/hbc/bytecode_parser.go` and add the new version to `GetParser()`:
+
+```go
+import (
+    // ... existing imports ...
+    "hermes-decompiler/pkg/hbc/types/opcodes/bcv97"
+)
+
+func GetParser(bcv int) *ParserModule {
+    parserModuleTable := map[int]*ParserModule{
+        // ... existing versions ...
+        96: {bcv96.OpcodeToInstruction, bcv96.NameToInstruction, bcv96.BuiltinFunctionNames},
+        97: {bcv97.OpcodeToInstruction, bcv97.NameToInstruction, bcv97.BuiltinFunctionNames},
+    }
+    
+    // ... rest of function ...
+}
+```
+
+### 4. Test the New Version
+
+Create a test HBC file with the new bytecode version:
+
+```bash
+# Compile a test JavaScript file with Hermes v0.XX.0
+hermesc -emit-binary -out test.hbc test.js
+
+# Verify bytecode version
+hexdump -C test.hbc | head -n 5
+
+# Test disassembly
+./hermes-decompiler disassemble -i test.hbc -o test.txt
+```
+
+### 5. Update Documentation
+
+Add the new version to:
+- `reference/bytecode-versions.mdx`
+- `README.md`
+- `CLAUDE.md`
+
+### 6. Submit Pull Request
+
+Include in your PR:
+- Generated opcode package
+- Updated parser registration
+- Test HBC file (if small enough)
+- Updated documentation
+
+## Testing Guidelines
+
+### Unit Tests
+
+Write tests for all new functionality:
+
+```go
+// pkg/analyzer/minhasher_test.go
+func TestMinHasher(t *testing.T) {
+    tokens := []string{"token1", "token2", "token3"}
+    minhash := GenerateMinHash(tokens, 128)
+    
+    if len(minhash) != 128 {
+        t.Errorf("Expected 128 hashes, got %d", len(minhash))
+    }
+}
+```
+
+### Integration Tests
+
+Test end-to-end workflows:
+
+```go
+func TestDisassembleAndAnalyze(t *testing.T) {
+    // 1. Disassemble HBC file
+    hbcReader, err := NewHBCReader("test.hbc")
+    if err != nil {
+        t.Fatalf("Failed to read HBC: %v", err)
+    }
+    
+    // 2. Create function objects
+    functionObjects, err := CreateFunctionObjects(hbcReader)
+    if err != nil {
+        t.Fatalf("Failed to create function objects: %v", err)
+    }
+    
+    // 3. Verify function count
+    if len(functionObjects) == 0 {
+        t.Error("No functions extracted")
+    }
+}
+```
+
+### Test Coverage
+
+Aim for >80% code coverage:
+
+```bash
+go test -coverprofile=coverage.out ./...
+go tool cover -html=coverage.out
+```
+
+## Documentation
+
+### Code Documentation
+
+All exported functions must have documentation comments:
+
+```go
+// ParseHBCBytecode disassembles the bytecode of a single Hermes function into
+// a sequence of decoded instructions. It accepts either a *SmallFunctionHeader
+// or *LargeFunctionHeader to locate the function's bytecode within the HBC
+// file.
+func ParseHBCBytecode(functionHeader any, hbcReader *HBCReader) ([]*ParsedInstruction, error) {
+    // ...
+}
+```
+
+### User Documentation
+
+Update MDX files in `docs/` for user-facing changes:
+
+- **Guides** - `docs/guides/`
+- **API Reference** - `docs/reference/`
+- **Development** - `docs/development/`
+
+## Project Structure
+
+### Core Packages
+
+| Package | Purpose | Key Files |
+|---------|---------|----------|
+| `pkg/hbc` | HBC parsing | `HBCReader.go`, `bytecode_parser.go`, `normalizer.go` |
+| `pkg/analyzer` | Fingerprinting | `compute.go`, `minhasher.go`, `service.go` |
+| `pkg/database` | MongoDB ops | `main.go`, `service.go`, `models/` |
+| `pkg/pipeline` | Package processing | `rnprocessor.go`, `packages.go`, `security.go` |
+| `pkg/cmd` | CLI commands | `analyze.go`, `disassemble.go`, `maintainDatabase.go` |
+
+### Utility Packages
+
+| Package | Purpose |
+|---------|----------|
+| `pkg/utils` | Logging, file I/O, helpers |
+| `pkg/global` | Global state and configuration |
+
+## Common Development Tasks
+
+### Add a New CLI Command
+
+1. Create command file in `pkg/cmd/`:
+
+```go
+// pkg/cmd/mycommand.go
+package cmd
+
+import (
+    "github.com/spf13/cobra"
+)
+
+var myCmd = &cobra.Command{
+    Use:   "mycommand",
+    Short: "Description of my command",
+    Run: func(cmd *cobra.Command, args []string) {
+        // Command logic
+    },
+}
+
+func init() {
+    rootCmd.AddCommand(myCmd)
+}
+```
+
+2. Add tests:
+
+```go
+// pkg/cmd/mycommand_test.go
+func TestMyCommand(t *testing.T) {
+    // Test implementation
+}
+```
+
+### Add a Database Collection
+
+1. Create model in `pkg/database/models/`:
+
+```go
+// pkg/database/models/my_model.go
+type MyModel struct {
+    ID   primitive.ObjectID `bson:"_id,omitempty"`
+    Name string             `bson:"name"`
+}
+```
+
+2. Add service methods in `pkg/database/service.go`:
+
+```go
+func InsertMyModel(model *MyModel) error {
+    collection := DB.Collection("my_collection")
+    _, err := collection.InsertOne(context.Background(), model)
+    return err
+}
+```
+
+### Add a New Normalization Level
+
+Edit `pkg/hbc/types/functionobject.go`:
+
+```go
+func (fo *FunctionObject) ToIR() (structuralIR, contentIR1, contentIR2, contentIR3 string) {
+    // Add new IR3 generation logic
+    contentIR3 = generateContentIR3(fo)
+    return structuralIR, contentIR1, contentIR2, contentIR3
+}
+```
+
+Update hash computation in `pkg/analyzer/compute.go`.
+
+## Release Process
+
+1. **Update version** in `main.go`
+2. **Update CHANGELOG.md**
+3. **Tag release:**
+   ```bash
+   git tag -a v1.2.0 -m "Release v1.2.0"
+   git push origin v1.2.0
+   ```
+4. **Build binaries** for all platforms
+5. **Create GitHub release** with binaries attached
+
+## Getting Help
+
+- **GitHub Issues:** Report bugs or request features
+- **Discussions:** Ask questions or propose ideas
+- **Documentation:** Check the [docs](/) first
+
+## Code of Conduct
+
+Be respectful and constructive. Follow the [Contributor Covenant](https://www.contributor-covenant.org/).
+
+## License
+
+By contributing, you agree that your contributions will be licensed under the same license as the project.

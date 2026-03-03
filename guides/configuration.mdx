@@ -1,0 +1,421 @@
+---
+title: Configuration
+description: Guide for configuring environment variables and MongoDB
+---
+
+Hedis configuration is managed through environment variables and a MongoDB connection. This guide covers all configuration options for running the decompiler, building the database, and analyzing apps.
+
+## Environment Variables
+
+Hedis uses a `.env` file for configuration, automatically loaded via `godotenv/autoload` (see `pkg/database/main.go:16`).
+
+### Creating the Configuration File
+
+Create a `.env` file in `go/hermes-decompiler/`:
+
+```bash
+cd go/hermes-decompiler
+touch .env
+```
+
+Add your configuration:
+
+```bash
+# MongoDB Connection
+MONGO_CONNECTION_STRING=mongodb://localhost:27017
+MONGO_DB_NAME=hedis
+
+# Hermes Compiler Platform
+OS_HERMES=osx-bin
+
+# GitHub API Access (optional, for security advisories)
+GITHUB_TOKEN=ghp_your_personal_access_token_here
+```
+
+## Required Variables
+
+### MONGO_CONNECTION_STRING
+
+**Purpose:** MongoDB connection URI for storing fingerprints and package metadata.
+
+**Format:** Standard MongoDB connection string.
+
+**Examples:**
+
+<CodeGroup>
+```bash Local MongoDB
+MONGO_CONNECTION_STRING=mongodb://localhost:27017
+```
+
+```bash MongoDB Atlas
+MONGO_CONNECTION_STRING=mongodb+srv://user:password@cluster.mongodb.net/
+```
+
+```bash Authenticated Local
+MONGO_CONNECTION_STRING=mongodb://admin:password@localhost:27017/?authSource=admin
+```
+
+```bash Replica Set
+MONGO_CONNECTION_STRING=mongodb://host1:27017,host2:27017,host3:27017/?replicaSet=rs0
+```
+</CodeGroup>
+
+**Error if missing:**
+```bash
+MONGO_CONNECTION_STRING is not set
+exit status 1
+```
+
+### OS_HERMES
+
+**Purpose:** Specifies the Hermes compiler binary platform for the pipeline.
+
+**Values:**
+- `osx-bin` — macOS (Intel or Apple Silicon)
+- `linux64-bin` — Linux x64
+
+**Default:** `osx-bin` (if not set)
+
+**How it's used** (from `pkg/cmd/maintainDatabase.go:44`):
+```go
+osHermes := os.Getenv("OS_HERMES")
+hermesCompilerPath := filepath.Join(
+  reactNativeWorkingDirectory,
+  "node_modules/react-native/sdks/hermesc",
+  osHermes,  // ← osx-bin or linux64-bin
+  "hermesc"
+)
+```
+
+**When to change:**
+- Running on a Linux server: `OS_HERMES=linux64-bin`
+- Running on macOS: `OS_HERMES=osx-bin` (default)
+
+## Optional Variables
+
+### MONGO_DB_NAME
+
+**Purpose:** MongoDB database name for storing Hedis collections.
+
+**Default:** `hedis`
+
+**When to customize:**
+- Running multiple environments (dev, staging, prod)
+- Separating vulnerable package data from general packages
+
+**Example:**
+```bash
+# Development environment
+MONGO_DB_NAME=hedis_dev
+
+# Production
+MONGO_DB_NAME=hedis_prod
+```
+
+### GITHUB_TOKEN
+
+**Purpose:** GitHub Personal Access Token for querying the Security Advisory API.
+
+**Required for:** `maintain-database -s` and `maintain-database -g` commands.
+
+**How to create:**
+
+<Steps>
+  <Step title="Generate a PAT">
+    Go to GitHub → Settings → Developer settings → Personal access tokens → Generate new token (classic)
+  </Step>
+
+  <Step title="Select scopes">
+    Required scope:
+    - `public_repo` (for accessing public security advisories)
+
+    Optional:
+    - `read:org` (if querying private organization advisories)
+  </Step>
+
+  <Step title="Add to .env">
+    ```bash
+    GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    ```
+  </Step>
+</Steps>
+
+**Usage example** (from `pkg/pipeline/security.go`):
+```go
+token := os.Getenv("GITHUB_TOKEN")
+headers := map[string]string{
+  "Authorization": "Bearer " + token,
+}
+// Query GitHub GraphQL API for security advisories
+```
+
+## MongoDB Setup
+
+### Local Installation
+
+<Tabs>
+  <Tab title="macOS">
+    ```bash
+    brew tap mongodb/brew
+    brew install mongodb-community@7.0
+    brew services start mongodb-community@7.0
+    ```
+
+    Verify:
+    ```bash
+    mongosh
+    # MongoDB shell version v2.x.x
+    ```
+  </Tab>
+
+  <Tab title="Linux">
+    ```bash
+    # Ubuntu/Debian
+    wget -qO - https://www.mongodb.org/static/pgp/server-7.0.asc | sudo apt-key add -
+    echo "deb [ arch=amd64 ] https://repo.mongodb.org/apt/ubuntu $(lsb_release -cs)/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+    sudo apt update
+    sudo apt install -y mongodb-org
+    sudo systemctl start mongod
+    ```
+
+    Verify:
+    ```bash
+    sudo systemctl status mongod
+    mongosh
+    ```
+  </Tab>
+
+  <Tab title="Docker">
+    ```bash
+    docker run -d \
+      --name mongodb \
+      -p 27017:27017 \
+      -v mongodb_data:/data/db \
+      mongo:7.0
+    ```
+
+    Connection string:
+    ```bash
+    MONGO_CONNECTION_STRING=mongodb://localhost:27017
+    ```
+  </Tab>
+</Tabs>
+
+### MongoDB Atlas (Cloud)
+
+For production or remote access:
+
+<Steps>
+  <Step title="Create a cluster">
+    Sign up at [mongodb.com/cloud/atlas](https://www.mongodb.com/cloud/atlas) and create a free M0 cluster.
+  </Step>
+
+  <Step title="Whitelist IP">
+    Database Access → Network Access → Add IP Address → Add Current IP
+  </Step>
+
+  <Step title="Create database user">
+    Database Access → Add New Database User
+    - Username: `hedis_user`
+    - Password: (generate strong password)
+    - Role: `Read and write to any database`
+  </Step>
+
+  <Step title="Get connection string">
+    Databases → Connect → Connect your application
+    ```bash
+    MONGO_CONNECTION_STRING=mongodb+srv://hedis_user:PASSWORD@cluster0.xxxxx.mongodb.net/hedis?retryWrites=true&w=majority
+    ```
+  </Step>
+</Steps>
+
+## Database Collections
+
+Hedis uses these MongoDB collections (from README:23):
+
+| Collection | Purpose | Index Recommendations |
+|---|---|---|
+| `packages` | npm package metadata (name, version, author, repository) | `package_unique_id` (unique) |
+| `hashes` | Function fingerprints per package per RN version | `package_id`, `react_native_version`, `hash.structural_hash` |
+| `hashes_ghsa` | Fingerprints for vulnerable packages only | Same as `hashes` |
+| `baselines_v3` | Empty RN app fingerprints (framework functions) | `react_native_version` (unique) |
+
+### Creating Indexes
+
+Optimize query performance:
+
+```javascript
+// Connect to MongoDB
+mongosh mongodb://localhost:27017/hedis
+
+// Create indexes
+db.packages.createIndex({ "package_unique_id": 1 }, { unique: true })
+db.hashes.createIndex({ "package_id": 1, "react_native_version": 1 })
+db.hashes.createIndex({ "hash.structural_hash": 1 })
+db.hashes.createIndex({ "hash.content_ir1_hash": 1 })
+db.hashes.createIndex({ "hash.content_ir2_hash": 1 })
+db.hashes_ghsa.createIndex({ "package_id": 1, "react_native_version": 1 })
+db.baselines_v3.createIndex({ "react_native_version": 1 }, { unique: true })
+```
+
+## Verifying Configuration
+
+### Test MongoDB Connection
+
+```bash
+mongosh "$MONGO_CONNECTION_STRING"
+```
+
+Expected output:
+```
+Current Mongosh Log ID: 65f1234567890abcdef12345
+Connecting to: mongodb://localhost:27017/?directConnection=true
+Using MongoDB: 7.0.6
+Using Mongosh: 2.1.5
+```
+
+### Test Hedis Connection
+
+```bash
+cd go/hermes-decompiler
+go run main.go maintain-database -b
+```
+
+Expected output:
+```
+Connecting to database...
+Database connected
+OS_HERMES: osx-bin
+Checking for new React Native Versions to create a baseline for...
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="MONGO_CONNECTION_STRING is not set">
+    **Cause:** Missing `.env` file or variable not defined.
+
+    **Solution:**
+    1. Create `.env` in `go/hermes-decompiler/`
+    2. Add `MONGO_CONNECTION_STRING=...`
+    3. Verify file location: `ls -la go/hermes-decompiler/.env`
+  </Accordion>
+
+  <Accordion title="Failed to connect to MongoDB">
+    **Cause:** MongoDB not running or incorrect connection string.
+
+    **Solutions:**
+    - Check MongoDB is running: `mongosh mongodb://localhost:27017`
+    - Verify connection string format
+    - For Atlas: check IP whitelist and credentials
+    - Check network/firewall: `telnet localhost 27017`
+  </Accordion>
+
+  <Accordion title="Error: Hermes compiler not found">
+    **Cause:** `OS_HERMES` points to wrong platform.
+
+    **Solution:**
+    ```bash
+    # macOS
+    OS_HERMES=osx-bin
+
+    # Linux
+    OS_HERMES=linux64-bin
+    ```
+
+    Verify compiler exists:
+    ```bash
+    ls pipeline/react-natives/rn075/node_modules/react-native/sdks/hermesc/
+    # Should show: linux64-bin/ osx-bin/ win64-bin/
+    ```
+  </Accordion>
+
+  <Accordion title="GitHub API rate limit exceeded">
+    **Cause:** Querying GitHub without authentication (60 requests/hour limit).
+
+    **Solution:**
+    Add `GITHUB_TOKEN` to `.env` (increases limit to 5000 requests/hour):
+    ```bash
+    GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    ```
+  </Accordion>
+
+  <Accordion title="Database queries are slow">
+    **Cause:** Missing indexes on large collections.
+
+    **Solution:**
+    Create indexes (see [Creating Indexes](#creating-indexes) above) and check query performance:
+    ```javascript
+    db.hashes.find({ "hash.structural_hash": "abc123..." }).explain("executionStats")
+    // Look for "IXSCAN" (index scan) not "COLLSCAN" (collection scan)
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Production Configuration
+
+For production deployments:
+
+### Security
+
+```bash
+# Use authentication
+MONGO_CONNECTION_STRING=mongodb://user:password@host:27017/?authSource=admin
+
+# Enable TLS
+MONGO_CONNECTION_STRING=mongodb://user:password@host:27017/?tls=true&tlsCAFile=/path/to/ca.pem
+```
+
+### Performance
+
+```bash
+# Use connection pooling
+MONGO_CONNECTION_STRING=mongodb://host:27017/?maxPoolSize=50&minPoolSize=10
+
+# Set write concern
+MONGO_CONNECTION_STRING=mongodb://host:27017/?w=majority&journal=true
+```
+
+### High Availability
+
+```bash
+# Use replica set
+MONGO_CONNECTION_STRING=mongodb://host1:27017,host2:27017,host3:27017/?replicaSet=rs0&readPreference=secondaryPreferred
+```
+
+## Environment-Specific Configs
+
+### Development
+
+```bash
+# .env.development
+MONGO_CONNECTION_STRING=mongodb://localhost:27017
+MONGO_DB_NAME=hedis_dev
+OS_HERMES=osx-bin
+```
+
+### Staging
+
+```bash
+# .env.staging
+MONGO_CONNECTION_STRING=mongodb://staging-db:27017
+MONGO_DB_NAME=hedis_staging
+OS_HERMES=linux64-bin
+GITHUB_TOKEN=ghp_staging_token
+```
+
+### Production
+
+```bash
+# .env.production
+MONGO_CONNECTION_STRING=mongodb+srv://user:pass@cluster.mongodb.net/hedis?retryWrites=true&w=majority
+MONGO_DB_NAME=hedis_prod
+OS_HERMES=linux64-bin
+GITHUB_TOKEN=ghp_prod_token
+```
+
+## Next Steps
+
+- [Build the fingerprint database](/guides/building-database)
+- [Analyze React Native apps](/guides/analyzing-apps)
+- [Generate opcodes for new Hermes versions](/guides/opcode-generation)

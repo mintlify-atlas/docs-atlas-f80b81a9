@@ -1,0 +1,350 @@
+---
+title: "maintain-database"
+description: "Build and maintain the fingerprint database for vulnerability detection"
+---
+
+The `maintain-database` command manages the Hedis fingerprint database, including React Native baseline generation, package processing across multiple RN versions, and security advisory synchronization.
+
+## Usage
+
+```bash
+hedis maintain-database [flags]
+```
+
+## Flags
+
+### Database Operations
+
+<ParamField path="-b, --baseline" type="boolean" default="false">
+  Create or update React Native version baselines. Generates fingerprints for empty React Native applications to filter out framework functions during analysis.
+  
+  Scans `pipeline/react-natives/` directory for `rn069`, `rn070`, etc. folders and creates baseline entries in the `baselines_v3` collection.
+</ParamField>
+
+<ParamField path="-p, --packages" type="boolean" default="false">
+  Process packages and generate fingerprints across all React Native versions. This is the main fingerprinting pipeline that:
+  
+  - Installs packages in each RN environment
+  - Compiles with version-specific Hermes compilers
+  - Generates function fingerprints
+  - Stores hashes in the database
+  - Supports resume capability via `pipeline_progress.json`
+</ParamField>
+
+<ParamField path="-s, --update-security-advisories" type="boolean" default="false">
+  Update security advisories for packages listed in `react-native-directory-packages.json`.
+  
+  Queries GitHub Security Advisory API for known vulnerabilities affecting React Native packages.
+</ParamField>
+
+<ParamField path="-g, --download-github-advisories-and-packages" type="boolean" default="false">
+  Download all GitHub Security Advisories and create package entries in the database.
+  
+  This is a comprehensive sync that fetches the entire GitHub Security Advisory database for npm ecosystem.
+</ParamField>
+
+### Configuration Flags
+
+<ParamField path="-v, --verbose" type="boolean" default="false">
+  Enable verbose output for detailed logging during database operations.
+</ParamField>
+
+<ParamField path="-c, --change-collection" type="boolean" default="false">
+  Change the database collection used for package processing. When enabled, uses `security-advisories-packages.json` instead of `react-native-directory-packages.json` and writes to the `hashes_ghsa` collection.
+</ParamField>
+
+## Examples
+
+### Generate React Native Baselines
+
+Create baseline fingerprints for all React Native versions:
+
+```bash
+hedis maintain-database --baseline
+```
+
+**What it does:**
+- Scans `pipeline/react-natives/` for `rn069` through `rn079` directories
+- For each version without an existing baseline:
+  - Compiles an empty React Native app
+  - Extracts function fingerprints
+  - Stores in `baselines_v3` collection with version and Hermes bytecode version
+
+**Example output:**
+```
+Connecting to database...
+Database connected
+Checking for new React Native Versions to create a baseline for...
+React Native 0.69 missing baseline -> running pipeline
+React Native 0.70 already exists
+React Native 0.71 missing baseline -> running pipeline
+...
+```
+
+### Process Packages Pipeline
+
+Run the full package fingerprinting pipeline:
+
+```bash
+hedis maintain-database --packages --verbose
+```
+
+**Pipeline workflow:**
+1. Reads package list from `react-native-directory-packages.json`
+2. Loads progress from `pipeline_progress.json` (if exists)
+3. Processes each pending RN version in parallel (max 4 concurrent)
+4. For each package in each RN version:
+   - `npm install <package>`
+   - Metro bundle
+   - Hermes compile
+   - Disassemble and hash
+   - Store in database
+   - Clean up node_modules
+5. Saves progress after each RN version completes
+
+**Example output:**
+```
+Found 1247 packages in packages directory json
+Total RN versions: 11, Pending: 3, Completed: 8
+Starting parallel processing for RN version: rn071
+Starting parallel processing for RN version: rn072
+[rn071] Processing package 145/1247: react-native-device-info
+[rn072] Processing package 145/1247: react-native-device-info
+...
+Completed parallel processing for RN version: rn071
+Total package hashes generated: 13717
+All package processing completed successfully!
+```
+
+<Warning>
+  The packages pipeline can take **several days** to complete for large package sets. It processes packages sequentially within each RN version but runs multiple RN versions in parallel. Use `pipeline_progress.json` to resume if interrupted.
+</Warning>
+
+### Process Vulnerable Packages Only
+
+Use the `--change-collection` flag to process only vulnerable packages:
+
+```bash
+hedis maintain-database --packages --change-collection
+```
+
+This reads from `security-advisories-packages.json` and stores hashes in the `hashes_ghsa` collection.
+
+### Update Security Advisories
+
+Sync GitHub Security Advisories for React Native packages:
+
+```bash
+hedis maintain-database --update-security-advisories
+```
+
+**What it does:**
+1. Reads package names from `react-native-directory-packages.json`
+2. Queries GitHub Security Advisory GraphQL API
+3. Stores advisories in the database with:
+   - Advisory ID (GHSA-xxxx-xxxx-xxxx)
+   - Severity (LOW, MODERATE, HIGH, CRITICAL)
+   - Affected versions
+   - Patched versions
+   - Published and updated dates
+
+### Download All GitHub Advisories
+
+Fetch the complete GitHub Security Advisory database:
+
+```bash
+hedis maintain-database --download-github-advisories-and-packages
+```
+
+<Warning>
+  This operation queries the entire GitHub Security Advisory database for the npm ecosystem and can take significant time. Use sparingly.
+</Warning>
+
+### Combined Operations
+
+Run multiple operations in sequence:
+
+```bash
+hedis maintain-database \
+  --baseline \
+  --update-security-advisories \
+  --packages \
+  --verbose
+```
+
+**Execution order:**
+1. Generate baselines
+2. Update security advisories
+3. Process packages
+
+## Database Collections
+
+### baselines_v3
+
+Stores React Native framework function fingerprints:
+
+```json
+{
+  "react_native_version": "0.71",
+  "hermes_bytecode_version": "94",
+  "hashes": [
+    {
+      "structural_hash": "a3f2c1d9...",
+      "content_ir1_hash": "9e8b7c6d...",
+      "content_ir2_hash": "c1d9e8b7...",
+      "relative_function_index": 0
+    }
+  ]
+}
+```
+
+### hashes / hashes_ghsa
+
+Stores package function fingerprints:
+
+```json
+{
+  "package_id": "ObjectId(...)",
+  "react_native_version": "0.71",
+  "hash": {
+    "structural_hash": "a3f2c1d9...",
+    "structural_raw": "LoadConstUndefined|Ret|CreateEnvironment",
+    "content_ir1_hash": "9e8b7c6d...",
+    "content_ir1_raw": "navigate_home|screen_title",
+    "content_ir2_hash": "c1d9e8b7...",
+    "content_ir2_raw": "navigationState|currentScreen",
+    "relative_function_index": 42
+  }
+}
+```
+
+### packages
+
+Stores package metadata and vulnerabilities:
+
+```json
+{
+  "package_name": "react-native-device-info",
+  "package_version": "8.1.0",
+  "ghsa_ids": ["GHSA-xxxx-xxxx-xxxx"],
+  "severity": "HIGH",
+  "vulnerable": true
+}
+```
+
+## Pipeline Resume Capability
+
+The `--packages` pipeline creates `pipeline_progress.json` to track progress:
+
+```json
+{
+  "total_rn_versions": 11,
+  "completed_rn_versions": 3,
+  "rn_versions": {
+    "rn069": {
+      "rn_version": "rn069",
+      "completed": true,
+      "last_package_index": 1247,
+      "total_packages": 1247
+    },
+    "rn071": {
+      "rn_version": "rn071",
+      "completed": false,
+      "last_package_index": 456,
+      "total_packages": 1247
+    }
+  }
+}
+```
+
+If the pipeline is interrupted, rerun the same command and it will resume from the last checkpoint.
+
+## Environment Variables
+
+<ParamField path="MONGO_CONNECTION_STRING" type="string" required>
+  MongoDB connection URI for database access.
+</ParamField>
+
+<ParamField path="MONGO_DB_NAME" type="string" default="hedis">
+  Database name to use. Defaults to `hedis`.
+</ParamField>
+
+<ParamField path="OS_HERMES" type="string" required>
+  Platform-specific Hermes compiler binary:
+  - `osx-bin` for macOS
+  - `linux64-bin` for Linux
+</ParamField>
+
+<ParamField path="GITHUB_TOKEN" type="string" required>
+  GitHub Personal Access Token for Security Advisory API queries. Requires `security_events` scope.
+</ParamField>
+
+## Directory Structure Requirements
+
+The pipeline expects this directory layout:
+
+```
+repo/
+├── go/hermes-decompiler/       # Binary execution directory
+│   ├── hedis
+│   ├── react-native-directory-packages.json
+│   ├── security-advisories-packages.json
+│   └── pipeline_progress.json  # Created by pipeline
+└── pipeline/
+    └── react-natives/
+        ├── rn069/              # React Native 0.69
+        │   └── node_modules/   # Must have hermesc installed
+        ├── rn070/
+        ├── rn071/
+        └── ...
+```
+
+<Warning>
+  **Do not modify** React Native environment directories (`rn069`, etc.) during pipeline execution. Each environment is used sequentially for all packages, so modifying `node_modules` or project files will corrupt the pipeline.
+</Warning>
+
+## Performance Tips
+
+### Parallel RN Version Processing
+
+The pipeline processes up to **4 React Native versions in parallel** using a semaphore. Adjust concurrency in `maintainDatabase.go:188`:
+
+```go
+semaphore := make(chan struct{}, 4) // Change 4 to your desired concurrency
+```
+
+### Database Batch Writes
+
+Hashes are written in batches of 100 to improve performance. Larger batches reduce database round trips but increase memory usage.
+
+### Package Filtering
+
+To process a subset of packages, edit the JSON package list file before running `--packages`.
+
+## Common Issues
+
+### "Failed to get working directory"
+
+Ensure you run the command from `go/hermes-decompiler/` directory:
+
+```bash
+cd go/hermes-decompiler
+./hedis maintain-database --baseline
+```
+
+### "Cannot parse version"
+
+React Native directory names must follow the format `rn069`, `rn070`, etc.
+
+### "Hermes compiler not found"
+
+Each React Native environment must have Hermes installed:
+
+```bash
+cd pipeline/react-natives/rn071
+npm install
+```
+
+### Pipeline Hangs on Package Installation
+
+Some packages have install scripts that hang. The pipeline uses timeouts but you may need to add problematic packages to a skip list.

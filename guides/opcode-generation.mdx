@@ -1,0 +1,312 @@
+---
+title: Opcode Generation
+description: Guide for generating opcode definitions for new Hermes versions
+---
+
+Hedis requires version-specific opcode definitions to parse Hermes bytecode files. This guide explains how to generate Go opcode packages from Hermes source code when you encounter a newer bytecode version.
+
+## Understanding Hermes Bytecode Versions
+
+Hermes bytecode files embed a version number in the header that determines the instruction set used to encode JavaScript. Each Hermes engine release may:
+
+- Introduce new opcodes (e.g., new array operations)
+- Remove deprecated opcodes
+- Reorder the opcode table
+- Change operand types or sizes
+
+Hedis ships with pre-generated opcode definitions for **30 bytecode versions** (v61–v96), covering Hermes releases v0.1.0 through v0.14.0+. These definitions live in:
+
+```
+pkg/hbc/types/opcodes/
+├── bcv61/
+├── bcv62/
+...
+└── bcv96/
+```
+
+## When to Regenerate Opcodes
+
+### Scenario 1: Analyzing a Newer App
+
+You try to analyze an `.hbc` file but get an error:
+
+```bash
+hermes-decompiler analyze -b app.hbc
+# Error: unsupported bytecode version 98
+```
+
+**Solution:** Generate opcodes for version 98.
+
+### Scenario 2: New Hermes Release
+
+Facebook ships a new Hermes version with bytecode changes. Check the [Hermes releases page](https://github.com/facebook/hermes/releases) for new tags.
+
+## Opcode Generation Workflow
+
+<Steps>
+  <Step title="Download Hermes definitions">
+    Run the download script to fetch C++ instruction definitions from the Hermes repository:
+
+    ```bash
+    cd go/hermes-decompiler
+    sh pkg/utils/download_all.sh
+    ```
+
+    **What it does** (from `pkg/utils/download_all.sh`):
+    - Fetches `BytecodeList.def` (instruction definitions)
+    - Fetches `BytecodeVersion.h` (version constants)
+    - Fetches `Builtins.def` (builtin function names)
+    - Stores files in `pkg/utils/defversions/`
+
+    **Example output:**
+    ```
+    ===== Downloading bytecode definitions =====
+    Fetching BytecodeList.def from hermes v0.12.0...
+    Fetching BytecodeList.def from hermes v0.13.0...
+    Fetching BytecodeList.def from hermes v0.14.0...
+    ===== All downloads completed =====
+    ```
+  </Step>
+
+  <Step title="Generate Go opcode packages">
+    Run the opcode generator to parse `.def` files and produce Go code:
+
+    ```bash
+    hermes-decompiler genopcodes
+    ```
+
+    **What it does** (from `pkg/cmd/genopcodes.go:16`):
+    - Parses each `BytecodeList.def` for instruction names, opcodes, and operands
+    - Generates `pkg/hbc/types/opcodes/bcvXX/hbcXX.go` for each version
+    - Creates instruction lookup tables and builtin name lists
+
+    **Generated file structure** (e.g., `pkg/hbc/types/opcodes/bcv96/hbc96.go`):
+    ```go
+    package bcv96
+
+    var Instructions = []Instruction{
+      {Opcode: 0x00, Name: "NewObjectWithBuffer", Operands: [...]},
+      {Opcode: 0x01, Name: "NewObject", Operands: [...]},
+      // ... 100+ instructions
+    }
+
+    var OpcodeTable = map[uint8]*Instruction{ /* ... */ }
+    var NameTable = map[string]*Instruction{ /* ... */ }
+    var BuiltinNames = []string{"Object", "Array", "String", /* ... */}
+    ```
+  </Step>
+
+  <Step title="Register the new version">
+    Generated packages are not automatically used. You must register them in the parser.
+
+    Edit `pkg/hbc/bytecode_parser.go` and add the new version to `parserModuleTable`:
+
+    ```go
+    import (
+      // ... existing imports
+      "hermes-decompiler/pkg/hbc/types/opcodes/bcv96"
+      "hermes-decompiler/pkg/hbc/types/opcodes/bcv98"  // ← Add this
+    )
+
+    var parserModuleTable = map[int]ParserModule{
+      // ... existing versions
+      96: {bcv96.Instructions, bcv96.BuiltinNames},
+      98: {bcv98.Instructions, bcv98.BuiltinNames},  // ← Add this
+    }
+    ```
+  </Step>
+
+  <Step title="Test the new parser">
+    Verify that the new version can parse bytecode:
+
+    ```bash
+    hermes-decompiler disassemble -i app-v98.hbc -o output.txt
+    ```
+
+    Check `output.txt` for valid disassembly output.
+  </Step>
+</Steps>
+
+## Download Scripts Deep Dive
+
+The `download_all.sh` script runs three specialized downloaders:
+
+### Bytecode Definitions
+
+```bash
+# pkg/utils/defversions/hermes_bytecode_src/get_source.sh
+curl -o BytecodeList.def \
+  https://raw.githubusercontent.com/facebook/hermes/v0.14.0/include/hermes/BCGen/HBC/BytecodeList.def
+```
+
+This file defines all instructions with their operand types:
+
+```cpp
+// From BytecodeList.def
+DEFINE_OPCODE_0(NewObject)
+DEFINE_OPCODE_1(NewObjectWithBuffer, Reg8)
+DEFINE_OPCODE_3(Add, Reg8, Reg8, Reg8)
+```
+
+### Function Builtins
+
+```bash
+# pkg/utils/defversions/function_builtins_src/get_source.sh
+curl -o Builtins.def \
+  https://raw.githubusercontent.com/facebook/hermes/v0.14.0/lib/VM/Builtins.def
+```
+
+This maps builtin function indices to names:
+
+```cpp
+// From Builtins.def
+BUILTIN(Object)
+BUILTIN(Array)
+BUILTIN(String)
+```
+
+### Regex Bytecode
+
+```bash
+# pkg/utils/defversions/regex_bytecode_src/get_source.sh
+curl -o RegExpBytecodeList.def \
+  https://raw.githubusercontent.com/facebook/hermes/v0.14.0/include/hermes/Regex/RegExpBytecodeList.def
+```
+
+Defines regex-specific opcodes (used by regex literal compilation).
+
+## Parser Version Fallback
+
+Not every bytecode version requires its own parser entry. The parser uses a **fallback strategy**:
+
+```go
+// From pkg/hbc/bytecode_parser.go:GetParser()
+func GetParser(version int) ParserModule {
+  // Try exact match first
+  if parser, ok := parserModuleTable[version]; ok {
+    return parser
+  }
+  
+  // Fallback: use highest registered version ≤ file version
+  highestVersion := 0
+  for v := range parserModuleTable {
+    if v <= version && v > highestVersion {
+      highestVersion = v
+    }
+  }
+  return parserModuleTable[highestVersion]
+}
+```
+
+**Example:**
+- File has bytecode version 93
+- Registered versions: 90, 92, 94, 96
+- Parser uses version 92 (highest ≤ 93)
+
+**When to register a new version:**
+- If the new version introduces incompatible instruction changes
+- If operand types change (e.g., Reg8 → Reg16)
+- If the opcode table is reordered
+
+**When to skip registration:**
+- If only builtin names changed (use previous version)
+- If changes are to unused instructions
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="download_all.sh fails to fetch files">
+    **Cause:** Network issue or Hermes repository structure changed.
+
+    **Solution:**
+    1. Check your internet connection
+    2. Verify the Hermes tag exists: https://github.com/facebook/hermes/tags
+    3. Manually download missing files:
+       ```bash
+       curl -L https://raw.githubusercontent.com/facebook/hermes/TAG/PATH > output.def
+       ```
+    4. Check script URLs in `pkg/utils/defversions/*/get_source.sh`
+  </Accordion>
+
+  <Accordion title="genopcodes produces invalid Go code">
+    **Cause:** `.def` file format changed in newer Hermes versions.
+
+    **Solution:**
+    1. Check the generated file: `pkg/hbc/types/opcodes/bcvXX/hbcXX.go`
+    2. Compare with a working version (e.g., `bcv96/hbc96.go`)
+    3. Update the parser in `pkg/utils/` (generator implementation)
+    4. File an issue on the Hedis repository with the `.def` file contents
+  </Accordion>
+
+  <Accordion title="Parser still can't read the bytecode version">
+    **Cause:** Forgot to register the version in `parserModuleTable`.
+
+    **Solution:**
+    1. Check `pkg/hbc/bytecode_parser.go` imports
+    2. Verify the version number in `parserModuleTable`
+    3. Rebuild: `go build -o hermes-decompiler .`
+  </Accordion>
+
+  <Accordion title="Disassembly output looks wrong">
+    **Cause:** Opcode table mismatch or operand size errors.
+
+    **Solution:**
+    1. Compare disassembly with official Hermes disassembler:
+       ```bash
+       hbcdump bundle.hbc
+       ```
+    2. Check if operand sizes match (Reg8 vs Reg16 vs Reg32)
+    3. Verify instruction order matches Hermes source
+    4. Test with a simple known bundle (e.g., `console.log('test')`)
+  </Accordion>
+</AccordionGroup>
+
+## Supporting Custom Hermes Forks
+
+If you're using a custom Hermes fork with modified opcodes:
+
+<Steps>
+  <Step title="Export your .def files">
+    Copy the definition files from your fork:
+    ```bash
+    cp your-hermes/include/hermes/BCGen/HBC/BytecodeList.def \
+       pkg/utils/defversions/hermes_bytecode_src/BytecodeList_custom.def
+    ```
+  </Step>
+
+  <Step title="Modify the download script">
+    Edit `pkg/utils/defversions/hermes_bytecode_src/get_source.sh` to use your custom files instead of downloading from GitHub.
+  </Step>
+
+  <Step title="Generate and register">
+    ```bash
+    hermes-decompiler genopcodes
+    # Edit bytecode_parser.go to add your custom version
+    ```
+  </Step>
+</Steps>
+
+## Version Mapping Reference
+
+| Hermes Version | Bytecode Version | React Native Version |
+|---|---|---|
+| v0.5.0 | v74 | 0.64 |
+| v0.7.0 | v76 | 0.66 |
+| v0.9.0 | v84 | 0.68 |
+| v0.11.0 | v90 | 0.70 |
+| v0.12.0 | v93 | 0.72 |
+| v0.13.0 | v95 | 0.74 |
+| v0.14.0 | v96 | 0.76 |
+
+To find the bytecode version for a Hermes release:
+
+```bash
+grep BYTECODE_VERSION hermes/include/hermes/BCGen/HBC/BytecodeVersion.h
+# Example output: #define BYTECODE_VERSION 96
+```
+
+## Next Steps
+
+- [Analyze apps](/guides/analyzing-apps) with the new parser
+- [Configure environment](/guides/configuration) for your setup
+- [Build the database](/guides/building-database) with packages using the new version

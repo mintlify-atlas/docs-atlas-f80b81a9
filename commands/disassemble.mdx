@@ -1,0 +1,190 @@
+---
+title: "disassemble"
+description: "Disassemble Hermes bytecode (.hbc) files into human-readable format"
+---
+
+The `disassemble` command reads and disassembles Hermes Bytecode (HBC) files, converting binary bytecode into a human-readable parsed format. This is useful for analyzing React Native app bundles, inspecting function implementations, and understanding bytecode structure.
+
+## Usage
+
+```bash
+hedis disassemble -i <hbc-file> -o <output-file> [flags]
+```
+
+## Required Flags
+
+<ParamField path="-i, --hbc" type="string" required>
+  Path to the input HBC (Hermes Bytecode) file to disassemble.
+</ParamField>
+
+## Optional Flags
+
+<ParamField path="-o, --output" type="string">
+  Path to the output file where the disassembled content will be written. If not specified, the command will parse the file without creating output.
+</ParamField>
+
+### Content Selection Flags
+
+<ParamField path="-f, --functions" type="boolean" default="true">
+  Include functions in the disassembled output. Functions contain the parsed bytecode instructions and are typically the most important part of the output.
+</ParamField>
+
+<ParamField path="-s, --strings" type="boolean" default="false">
+  Include the strings table in the disassembled output. This shows all string literals used in the bytecode.
+</ParamField>
+
+<ParamField path="-j, --objects" type="boolean" default="false">
+  Include objects extracted from the bytecode. This parses `NewObjectWithBuffer` instructions and displays their key-value content.
+</ParamField>
+
+<ParamField path="-z, --function-objects" type="boolean" default="false">
+  Include function objects in the disassembled output. This provides a higher-level view of function metadata.
+</ParamField>
+
+<ParamField path="-r, --function-objects-ir" type="boolean" default="false">
+  Include function objects Intermediate Representation (IR) in the output. This prints structural IR, content IR1, and content IR2 along with their SHA256 hashes. **Note:** `--function-objects` must be true for this flag to work.
+</ParamField>
+
+### Normalization Flags
+
+<ParamField path="-n, --normalization" type="integer" default="0">
+  Normalize the output for comparison purposes. Valid values:
+  - `0`: No normalization (default) - outputs raw bytecode representation
+  - `1`: IR1 normalization - applies first-level normalization
+  - `2`: IR2 normalization - applies second-level normalization
+</ParamField>
+
+## Examples
+
+### Basic Disassembly
+
+Disassemble an HBC file and write functions to an output file:
+
+```bash
+hedis disassemble -i index.android.bundle -o disassembled.txt
+```
+
+### Include Strings and Objects
+
+Disassemble with strings table and extracted objects:
+
+```bash
+hedis disassemble -i index.android.bundle -o output.txt -s -j
+```
+
+### Generate Function Object IR with Hashes
+
+Extract function object IR representations with SHA256 fingerprints (useful for vulnerability analysis):
+
+```bash
+hedis disassemble -i index.android.bundle -r
+```
+
+**Output example:**
+```
+Structural IR: LoadConstUndefined|Ret|CreateEnvironment|LoadConstUndefined|Mov
+Content IR1: react_native_app_title|navigate_to_home
+Content IR2: navigationState|currentScreen|props
+--------------------------------
+SHA256-StructuralIR: a3f2c1d9e8b7...
+SHA256-ContentIR1: 9e8b7c6d5a4f...
+SHA256-ContentIR2: c1d9e8b7a3f2...
+--------------------------------
+```
+
+### Full Analysis with All Content
+
+Disassemble with all available content types:
+
+```bash
+hedis disassemble \
+  -i index.android.bundle \
+  -o full_output.txt \
+  -s -f -j -z
+```
+
+### Normalized Output for Comparison
+
+Generate IR2-normalized output for fingerprinting:
+
+```bash
+hedis disassemble -i package.bundle -o normalized.txt -n 2
+```
+
+## Output Format
+
+The disassembled output file contains:
+
+1. **Header Information**: Hermes magic number, bytecode version, and function count
+2. **Strings** (if `-s`): All string literals with their string kind (identifier, predefined, etc.)
+3. **Functions** (if `-f`, default): Each function with:
+   - Function index, name, parameter count, and bytecode size
+   - Offset in the original file
+   - Disassembled bytecode instructions
+4. **Objects** (if `-j`): Extracted objects from `NewObjectWithBuffer` instructions
+5. **Function Objects** (if `-z`): High-level function object representations
+
+### Sample Output
+
+```
+HBC Hermes Header: 
+Hermes Magic: 0x1f1903c103bc1fc6
+Version: 94
+Function Count: 1247
+
+Functions:
+	=> [Function #0 'global' of 156 bytes]: 1 params @ offset 0x00003a80
+		 CreateEnvironment r0, 10
+		 LoadConstUndefined r1
+		 Mov r2, r1
+		 GetGlobalObject r3
+```
+
+## Common Use Cases
+
+### Analyzing React Native App Bundles
+
+Extract function implementations from a production app:
+
+```bash
+# Extract the HBC file from an .ipa or .apk first
+hedis disassemble -i index.android.bundle -o app_analysis.txt -s -f -j
+```
+
+### Generating Fingerprints for Vulnerability Detection
+
+Create IR hashes without writing a full output file:
+
+```bash
+hedis disassemble -i package.bundle -r
+```
+
+<Warning>
+  When using `-r` (function-objects-ir) without `-o`, the IR hashes are printed to stdout but no file is written. This is useful for quick fingerprint extraction.
+</Warning>
+
+### Debugging Hermes Compilation
+
+Compare bytecode at different normalization levels:
+
+<CodeGroup>
+```bash Raw
+hedis disassemble -i bundle.hbc -o raw.txt -n 0
+```
+
+```bash IR1
+hedis disassemble -i bundle.hbc -o ir1.txt -n 1
+```
+
+```bash IR2
+hedis disassemble -i bundle.hbc -o ir2.txt -n 2
+```
+</CodeGroup>
+
+## Notes
+
+- The command supports **27 Hermes bytecode versions** (v61-v96)
+- If the output path is not specified, the file is parsed but no output is written
+- Functions are included by default; use `-f=false` to exclude them
+- The `-r` flag is particularly useful for the `analyze` command's fingerprinting workflow
+- Normalization levels affect how instructions and identifiers are represented in the IR

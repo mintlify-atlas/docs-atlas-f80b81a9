@@ -1,0 +1,145 @@
+---
+title: Validation Results
+description: Empirical validation on real-world applications
+---
+
+## Overview
+
+The research methodology was validated through systematic analysis of both open-source and production React Native applications. The validation demonstrates the feasibility of coarse-grained dependency detection across different React Native versions and build configurations.
+
+## Validation Strategy
+
+The validation was performed on two categories of applications:
+
+1. **Open-source applications** with known dependency compositions for ground truth verification
+2. **Production applications** from major vendors to assess real-world applicability
+
+This dual approach ensures both accuracy validation (through open-source apps) and practical utility (through production apps).
+
+## Open-Source Application Validation
+
+Two popular open-source React Native applications were analyzed:
+
+### Rainbow Wallet
+
+**Rainbow** is a widely-used Ethereum wallet application built with React Native.
+
+- **Source availability**: Full source code and `package.json` available on GitHub
+- **Ground truth**: Known dependency tree enables precision and recall calculation
+- **Complexity**: Moderate-sized dependency graph with common npm packages
+- **Result**: Successfully detected vulnerable dependencies with high confidence
+
+The Rainbow validation confirmed that the fingerprinting approach could accurately identify packages despite Metro bundling and Hermes compilation transformations.
+
+### Mattermost Mobile
+
+**Mattermost** is an enterprise-grade team collaboration platform with a React Native mobile client.
+
+- **Source availability**: Open-source with documented build process
+- **Ground truth**: Extensive dependency tree with security-conscious package management
+- **Complexity**: Large codebase with numerous third-party integrations
+- **Result**: Demonstrated scalability to enterprise-sized applications
+
+<Note>
+Open-source validation was critical for establishing baseline accuracy metrics. By comparing detected dependencies against known package manifests, the research quantified both true positive rates and false positive rates.
+</Note>
+
+## Production Application Validation
+
+Two high-profile production applications were analyzed to demonstrate real-world applicability:
+
+### Discord Mobile
+
+**Discord** is a popular communication platform with over 150 million monthly active users.
+
+- **Distribution**: Downloaded from iOS App Store
+- **Scale**: Large production application with extensive functionality
+- **Build configuration**: Proprietary build pipeline with potential optimizations
+- **Result**: Successfully extracted and analyzed Hermes bytecode, identifying multiple third-party dependencies
+
+The Discord analysis demonstrated that the approach works on heavily optimized production builds where traditional source-based analysis is impossible.
+
+### Microsoft Outlook Mobile
+
+**Microsoft Outlook** is an enterprise email and calendar application.
+
+- **Distribution**: Official iOS App Store release
+- **Scale**: Enterprise-grade application with complex feature set
+- **Build configuration**: Microsoft's internal React Native build and deployment pipeline
+- **Result**: Bytecode successfully disassembled and fingerprinted, revealing dependency composition
+
+The Outlook validation was particularly significant as it represents a major vendor with sophisticated build processes and security practices.
+
+<Note>
+Production application validation confirmed that the static analysis pipeline remains effective even when:
+- Source code is unavailable
+- Build processes include code optimization and minification
+- Applications are distributed through official app stores
+- Vendors use custom React Native build configurations
+</Note>
+
+## Key Findings
+
+The validation across these four applications revealed several important insights:
+
+### Cross-Version Compatibility
+
+The pipeline successfully analyzed applications built with different React Native versions, demonstrating that the multi-version reference database approach is effective. Hermes bytecode versions ranged from v84 to v96 across the tested applications.
+
+### Code Transformation Resilience
+
+Despite various code transformations applied during the build process:
+
+- **Minification**: Variable and function names were renamed, but structural hashes remained stable
+- **Dead code elimination**: Unused functions were removed, but present functions matched reliably
+- **Bundling transformations**: Metro's module concatenation did not prevent fingerprint matching
+
+### Coarse-Grained Detection
+
+The approach provides **coarse-grained** dependency detection:
+
+- **Package-level identification**: The tool identifies which npm packages are present
+- **Version estimation**: Multiple React Native environments improve version detection accuracy
+- **Function-level granularity**: Individual vulnerable functions can be located within packages
+
+This granularity is sufficient for vulnerability assessment while remaining resilient to build-time transformations.
+
+### Performance Characteristics
+
+- **Database construction**: Processing the reference database for thousands of packages took several days of parallel processing
+- **Application analysis**: Individual app analysis completed in minutes to hours depending on application size
+- **Fuzzy matching overhead**: Enabling fuzzy matching increased analysis time by 2-3x but improved recall
+
+## Limitations and Future Work
+
+The validation also identified areas for improvement:
+
+### Version Precision
+
+While package presence can be reliably detected, precise version identification remains challenging when:
+
+- Multiple versions share similar code
+- Only small portions of a package are included (tree-shaking)
+- Custom patches or modifications are applied
+
+### False Positives
+
+Some false positives occurred due to:
+
+- **Code duplication**: Common utility functions appear in multiple packages
+- **Framework overlap**: Baseline filtering reduced but did not eliminate all framework matches
+- **Generic patterns**: Small functions with generic implementations matched multiple sources
+
+### Coverage Gaps
+
+The current implementation focuses on:
+
+- **iOS applications only**: Android support requires additional Hermes bytecode extraction logic
+- **JavaScript dependencies**: Native modules and platform-specific code are not analyzed
+- **Public packages**: Private or proprietary packages are not in the reference database
+
+## Conclusion
+
+The validation on Rainbow, Mattermost, Discord, and Microsoft Outlook demonstrates that static analysis of Hermes bytecode is a viable approach for supply chain security assessment of React Native applications. The combination of structural and content-based fingerprinting provides sufficient robustness to handle real-world build transformations while maintaining acceptable accuracy.
+
+For complete technical details and quantitative results, refer to the [full thesis](https://doi.org/10.26083/tuprints-00031438).

@@ -1,0 +1,254 @@
+---
+title: Analyzing Apps
+description: Step-by-step guide for analyzing React Native applications for supply chain vulnerabilities
+---
+
+This guide walks you through analyzing React Native application bundles (`.ipa` or `.hbc` files) to detect vulnerable npm packages by matching bytecode fingerprints against the Hedis database.
+
+## Prerequisites
+
+Before analyzing an app, ensure you have:
+
+- Built the Hedis decompiler (`go build -o hermes-decompiler .`)
+- Set up MongoDB connection (see [Configuration](/guides/configuration))
+- Built the fingerprint database (see [Building Database](/guides/building-database))
+- Obtained an `.ipa` file or extracted `.hbc` bundle from a React Native app
+
+## Extracting Hermes Bytecode
+
+### From IPA Files
+
+React Native iOS apps bundle Hermes bytecode in the `.app` bundle within the `.ipa` archive:
+
+<Steps>
+  <Step title="Extract the IPA">
+    Unzip the IPA file to access the app bundle:
+    ```bash
+    unzip YourApp.ipa
+    ```
+  </Step>
+
+  <Step title="Locate the HBC file">
+    Find the main bundle file, typically named `main.jsbundle` or `index.ios.bundle`:
+    ```bash
+    find Payload -name "*.jsbundle" -o -name "*.bundle"
+    ```
+  </Step>
+
+  <Step title="Verify the magic number">
+    Confirm it's a valid Hermes bytecode file by checking the magic number:
+    ```bash
+    hexdump -C main.jsbundle | head -n 1
+    # Should start with: c6 1f c1 03 c1 03 19 1f (Hermes magic)
+    ```
+  </Step>
+</Steps>
+
+### From Android APK Files
+
+For Android apps, the bytecode is typically in the `assets` directory:
+
+```bash
+unzip YourApp.apk
+find assets -name "index.android.bundle"
+```
+
+## Analysis Modes
+
+### Basic Analysis
+
+Analyze an HBC file with exact hash matching:
+
+```bash
+hermes-decompiler analyze -b path/to/bundle.hbc
+```
+
+This command:
+1. Disassembles the HBC file
+2. Extracts function fingerprints (structural, content IR1, content IR2)
+3. Queries the MongoDB database for exact hash matches
+4. Reports matched packages with version and React Native version
+
+**Example output:**
+```
+HBC file parsed successfully. Hermes version: 84, Function count: 1523
+Extracted 1523 structural hashes, 892 content IR1 hashes, 456 content IR2 hashes
+Found 234 exact matches:
+  - react-native-image-picker@4.8.0 (RN 0.71)
+  - @react-navigation/native@6.0.11 (RN 0.71)
+```
+
+### Fuzzy Matching Analysis
+
+Enable fuzzy matching to detect packages even when bytecode differs slightly due to different optimization levels or minor version differences:
+
+```bash
+hermes-decompiler analyze -b bundle.hbc -f -c 0.85
+```
+
+Flags:
+- `-f` / `--fuzzy-matching` — Enable Levenshtein distance-based fuzzy matching
+- `-c` / `--confidence-threshold` — Minimum similarity score (0.0–1.0, default: 0.8)
+
+**How fuzzy matching works:**
+- Compares raw IR strings (not just hashes) for functions ≥30 characters
+- Uses length-based pre-filtering (±20% tolerance) for performance
+- Calculates Levenshtein similarity for candidate matches
+- Reports matches above the confidence threshold
+
+<Accordion title="Performance tuning for fuzzy matching">
+  Fuzzy matching is computationally expensive. Adjust these flags for large bundles:
+
+  ```bash
+  hermes-decompiler analyze -b bundle.hbc -f \
+    --max-fuzzy-docs 10000 \
+    --length-tolerance 0.15
+  ```
+
+  - `--max-fuzzy-docs` — Limit documents checked per IR string (default: 5000)
+  - `--length-tolerance` — Tighten length pre-filter (default: 0.2 = ±20%)
+</Accordion>
+
+### Specific Package Analysis
+
+Compare a known package's bytecode against an app bundle to verify inclusion:
+
+```bash
+hermes-decompiler analyze -s \
+  -p path/to/package.hbc \
+  -a path/to/app-bundle.hbc \
+  -o results.txt
+```
+
+This performs direct comparison without database queries:
+1. Extracts fingerprints from both files
+2. Computes exact hash matches
+3. Runs fuzzy IR comparison for non-matching functions
+4. Outputs detailed match statistics to `results.txt`
+
+**Example output (`results.txt`):**
+```
+Exact hash matches:
+  • Structural : 142/156 (91.03%)
+  • Content IR1: 89/103 (86.41%)
+  • Content IR2: 67/78 (85.90%)
+  ⇒ Overall    : 298/337 (88.43%)
+
+Fuzzy IR matches (≥0.80 similarity):
+  • Structural : 8/14 (57.14%)
+  • Content IR1: 11/14 (78.57%)
+  • Content IR2: 6/11 (54.55%)
+  ⇒ Overall    : 25/39 (64.10%)
+```
+
+## Understanding Results
+
+### Hash Types
+
+Hedis uses three complementary fingerprint types per function (from `pkg/hbc/types/functionobject.go:ToIR`):
+
+1. **Structural Hash** — SHA256 of instruction bigrams (opcode sequences)
+   - Captures control flow patterns
+   - Most stable across builds
+
+2. **Content IR1 Hash** — SHA256 of non-identifier string literals
+   - Detects string constants (error messages, URLs, etc.)
+   - Uses trigram shingling for fuzzy matching
+
+3. **Content IR2 Hash** — SHA256 of identifiers and object references
+   - Captures variable/function names
+   - More fragile (affected by minification)
+
+### Baseline Filtering
+
+The analyzer automatically filters out React Native framework functions using the `baselines_v3` collection. Only application and third-party package functions are reported.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Error: failed to parse HBC file">
+    **Cause:** The file is not a valid Hermes bytecode file or uses an unsupported version.
+
+    **Solution:**
+    1. Verify the magic number: `hexdump -C file.hbc | head -n 1`
+    2. Check supported versions: v61–v96 (see [Opcode Generation](/guides/opcode-generation))
+    3. If the version is newer, generate opcodes for that version
+  </Accordion>
+
+  <Accordion title="MONGO_CONNECTION_STRING is not set">
+    **Cause:** Environment variables not loaded.
+
+    **Solution:**
+    Create a `.env` file in `go/hermes-decompiler/` with MongoDB configuration:
+    ```bash
+    MONGO_CONNECTION_STRING=mongodb://localhost:27017
+    MONGO_DB_NAME=hedis
+    ```
+  </Accordion>
+
+  <Accordion title="No hash matches found">
+    **Possible causes:**
+    1. Database is empty — run the pipeline to build fingerprints
+    2. App uses a React Native version not in your database
+    3. App's Hermes compiler settings differ significantly from your baselines
+
+    **Solution:**
+    - Check database contents: `mongosh hedis --eval 'db.hashes.countDocuments()'`
+    - Try fuzzy matching: `-f -c 0.75`
+    - Build database for the app's RN version
+  </Accordion>
+
+  <Accordion title="Fuzzy matching is too slow">
+    **Solution:**
+    - Reduce `--max-fuzzy-docs` to 1000–2000
+    - Increase `--confidence-threshold` to 0.9
+    - Tighten `--length-tolerance` to 0.1
+    - Use exact matching first, then fuzzy only for unmatched functions
+  </Accordion>
+</AccordionGroup>
+
+## Advanced Usage
+
+### Batch Analysis
+
+Analyze multiple apps and aggregate results:
+
+```bash
+for ipa in apps/*.ipa; do
+  bundle=$(unzip -p "$ipa" 'Payload/*.app/main.jsbundle' 2>/dev/null)
+  if [ -n "$bundle" ]; then
+    echo "$bundle" | hermes-decompiler analyze -b - >> results.txt
+  fi
+done
+```
+
+### Integration with CI/CD
+
+Run Hedis analysis as part of your build pipeline to detect supply chain risks:
+
+```yaml
+# .github/workflows/analyze.yml
+- name: Analyze app bundle
+  run: |
+    hermes-decompiler analyze -b app/build/index.android.bundle -o analysis.txt
+    if grep -q "vulnerable-package" analysis.txt; then
+      echo "⚠️ Vulnerable package detected"
+      exit 1
+    fi
+```
+
+### Exporting Results
+
+Save analysis results to a file for further processing:
+
+```bash
+hermes-decompiler analyze -b bundle.hbc -f -o analysis.txt
+```
+
+The output file contains match percentages and detailed function-level matches for manual review or automated processing.
+
+## Next Steps
+
+- Learn how to [build the fingerprint database](/guides/building-database)
+- Understand [configuration options](/guides/configuration)
+- Add support for [new Hermes versions](/guides/opcode-generation)

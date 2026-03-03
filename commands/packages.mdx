@@ -1,0 +1,381 @@
+---
+title: "packages"
+description: "Manage package database and perform direct package-to-app analysis"
+---
+
+The `packages` command provides utilities for managing the package vulnerability database and performing specialized analysis comparing packages directly against app bundles. It operates on the `clean` database (separate from the main `hedis` database).
+
+## Usage
+
+```bash
+hedis packages [flags]
+```
+
+## Flags
+
+### Database Management
+
+<ParamField path="-u, --update-database" type="boolean" default="false">
+  Update the database with packages from `direct-vulnerabilities.json`. Creates package entries with vulnerability metadata.
+</ParamField>
+
+<ParamField path="--create-hashes" type="boolean" default="false">
+  Generate function fingerprints for all packages in the database across all React Native versions. This is a comprehensive operation that:
+  
+  - Fetches RN baselines
+  - Processes each package across all RN environments
+  - Generates and stores hashes
+  - Filters out framework functions using baselines
+</ParamField>
+
+### Analysis Modes
+
+<ParamField path="-s, --specific-analysis" type="boolean" default="false">
+  Enable specific package-to-app analysis mode. Compare a specific package HBC file against an app bundle with baseline filtering.
+</ParamField>
+
+<ParamField path="-d, --analyze-with-database" type="boolean" default="false">
+  Analyze an app bundle against all packages in the database. Generates a ranked list of package matches.
+</ParamField>
+
+### Analysis Parameters
+
+<ParamField path="-p, --specific-package" type="string">
+  Path to the package HBC file. Required when `--specific-analysis` is enabled.
+</ParamField>
+
+<ParamField path="-a, --compare-to-app-bundle" type="string">
+  Path to the app bundle HBC file to analyze. Required for both analysis modes.
+</ParamField>
+
+<ParamField path="-o, --output-file" type="string">
+  Path to the output file for analysis results. Defaults to `<bundle-name>_match_results.txt` for database analysis.
+</ParamField>
+
+<ParamField path="-v, --verbose" type="boolean" default="false">
+  Enable verbose output for detailed logging.
+</ParamField>
+
+## Examples
+
+### Update Package Database
+
+Import packages from vulnerability JSON:
+
+```bash
+hedis packages --update-database
+```
+
+**What it does:**
+- Reads `direct-vulnerabilities.json` from the current directory
+- Extracts unique packages with version ranges
+- Creates `PackageWithVulnerabilitiesModel` entries in the `clean` database
+- Associates packages with their GHSA IDs and severity levels
+
+**Example output:**
+```
+Connecting to database...
+Database connected
+Found 342 packages in direct-vulnerabilities.json
+Total of 1247 package versions
+Updating packages in database...
+```
+
+### Generate Hashes for All Packages
+
+Create fingerprints for database packages:
+
+```bash
+hedis packages --create-hashes --verbose
+```
+
+<Warning>
+  This is an extremely time-consuming operation that processes each package across all 11 React Native versions. It can take **several days** to complete for hundreds of packages.
+</Warning>
+
+**Workflow:**
+1. Fetch RN baselines from database
+2. For each package:
+   - For each RN version:
+     - Install package
+     - Metro bundle
+     - Hermes compile
+     - Disassemble and hash
+     - Filter baseline matches
+     - Store in database
+
+### Specific Package Analysis
+
+Compare a package against an app bundle with baseline filtering:
+
+```bash
+hedis packages \
+  --specific-analysis \
+  --specific-package react-native-fs@2.20.0.bundle \
+  --compare-to-app-bundle production-app.bundle \
+  --output-file analysis.txt
+```
+
+**What it does:**
+1. Extracts Hermes bytecode version from both bundles
+2. Generates function object hashes
+3. Identifies the best-matching RN baseline based on bytecode version
+4. Filters out framework functions from the app bundle
+5. Compares package hashes against filtered app hashes
+6. Reports match percentages across three hash types
+
+**Example output:**
+```
+App bundle HBC version: 94
+Found 3841 function objects in app bundle
+Package HBC version: 94
+Found 156 function objects in package
+
+Generating hashes for app bundle...
+Generated 3841 hashes for app bundle
+Found 3841 unique hashes in app bundle
+
+Generating hashes for package...
+Generated 156 hashes for package
+
+Matching hashes with RN baselines...
+Found 2584 hashes for app bundle that matched the best RN baseline: 0.71
+
+Comparing 1257 app bundle hashes with 156 package hashes...
+Structural: 142/156 package hashes matched (91.03%)
+ContentIR1: 98/124 package hashes matched (79.03%)
+ContentIR2: 131/145 package hashes matched (90.34%)
+Combined: 147/156 package hashes matched
+Total: 371/1257 package hashes matched (29.51%)
+```
+
+### Database Analysis
+
+Analyze an app bundle against all packages in the database:
+
+```bash
+hedis packages \
+  --analyze-with-database \
+  --compare-to-app-bundle production-app.bundle \
+  --output-file matches.txt
+```
+
+**What it does:**
+1. Disassembles the app bundle and generates hashes
+2. Identifies best RN baseline match
+3. Filters framework functions from app hashes
+4. Queries database for all package hashes matching the RN version
+5. Compares app against each package
+6. Ranks results by combined match count
+7. Writes full results to output file
+
+**Example output:**
+```
+Getting RN baselines...
+Extracting HBC versions...
+App bundle HBC version: 94
+Found 3841 function objects in app bundle
+
+Matching hashes with RN baselines...
+Found 1257 hashes for app bundle that matched the best RN baseline: 0.71
+
+Getting hashes from database...
+Found 342 packages with a total of 45612 hashes in database for RN version 0.71
+
+Comparing app bundle hashes with database hashes...
+
+Top 10 matches:
+1. react-native-device-info@8.1.0 (ObjectId(...))
+Combined: 147/156 (94.23%) package hashes matched
+
+2. react-native-fs@2.20.0 (ObjectId(...))
+Combined: 89/95 (93.68%) package hashes matched
+
+3. @react-native-async-storage/async-storage@1.17.11 (ObjectId(...))
+Combined: 67/78 (85.90%) package hashes matched
+...
+```
+
+**Output file format:**
+```
+147/156 (94.23%) react-native-device-info@8.1.0
+89/95 (93.68%) react-native-fs@2.20.0
+67/78 (85.90%) @react-native-async-storage/async-storage@1.17.11
+...
+
+Package versions with the highest combined matches:
+react-native-device-info: react-native-device-info@8.1.0 (147/156 (94.23%))
+react-native-fs: react-native-fs@2.20.0 (89/95 (93.68%))
+...
+```
+
+### Combined Workflow
+
+Build database and analyze:
+
+<CodeGroup>
+```bash Step 1: Update DB
+hedis packages --update-database
+```
+
+```bash Step 2: Generate Hashes
+hedis packages --create-hashes
+```
+
+```bash Step 3: Analyze App
+hedis packages -d -a production.bundle -o results.txt
+```
+</CodeGroup>
+
+## Analysis Metrics
+
+The analysis compares three hash types:
+
+### Structural Hash
+- Based on instruction opcode bigrams (sequences)
+- Resistant to identifier renaming and string changes
+- Best for detecting code structure similarity
+
+### Content IR1 Hash
+- Based on non-identifier strings (literals, messages, etc.)
+- Good for detecting string constant similarity
+- Vulnerable to string obfuscation
+
+### Content IR2 Hash
+- Based on identifiers and object references
+- Good for detecting variable/function name similarity
+- Vulnerable to minification and obfuscation
+
+### Combined Metric
+
+A function matches if **any** of the three hashes match. The combined metric gives the best overall indication of package presence.
+
+## Baseline Filtering
+
+Both analysis modes use RN baseline filtering:
+
+1. **Extract HBC version** from the app bundle
+2. **Find best baseline match** by comparing app hashes against all RN baselines
+3. **Filter framework hashes** that match the baseline
+4. **Compare remaining hashes** against package fingerprints
+
+This removes React Native framework functions to reduce false positives.
+
+## Database Schema
+
+The `clean` database uses these collections:
+
+### packages
+
+```json
+{
+  "package_name": "react-native-device-info",
+  "package_version": "8.1.0",
+  "ghsa_ids": ["GHSA-xxxx-xxxx-xxxx"],
+  "severity": "HIGH",
+  "vulnerable": true,
+  "created_at": "2024-01-15T10:30:00Z"
+}
+```
+
+### hashes
+
+```json
+{
+  "package_id": "ObjectId(...)",
+  "react_native_version": "0.71",
+  "hash": {
+    "structural_hash": "a3f2c1d9e8b7...",
+    "structural_raw": "LoadConstUndefined|Ret|CreateEnvironment|...",
+    "content_ir1_hash": "9e8b7c6d5a4f...",
+    "content_ir1_raw": "navigate|title|home",
+    "content_ir2_hash": "c1d9e8b7a3f2...",
+    "content_ir2_raw": "navigationState|screenProps",
+    "relative_function_index": 42
+  }
+}
+```
+
+## Environment Variables
+
+<ParamField path="MONGO_CONNECTION_STRING" type="string" required>
+  MongoDB connection URI.
+</ParamField>
+
+<ParamField path="OS_HERMES" type="string" required>
+  Platform-specific Hermes binary: `osx-bin` or `linux64-bin`.
+</ParamField>
+
+## File Requirements
+
+### direct-vulnerabilities.json
+
+Required for `--update-database`:
+
+```json
+[
+  {
+    "packageName": "react-native-device-info",
+    "vulnerableVersions": ["8.0.0", "8.1.0"],
+    "ghsaIds": ["GHSA-xxxx-xxxx-xxxx"],
+    "severity": "HIGH"
+  }
+]
+```
+
+## Performance Considerations
+
+### Hash Generation
+
+- Processing all packages can take **days** for large package sets
+- Each package is installed and compiled 11 times (once per RN version)
+- Uses parallel RN version processing (max 4 concurrent)
+
+### Database Analysis
+
+- Queries all package hashes for the detected RN version
+- Performs in-memory comparisons
+- Sorts results by combined match count
+- Typically completes in seconds to minutes depending on database size
+
+## Common Use Cases
+
+### Vulnerability Research
+
+Build a database of vulnerable package fingerprints:
+
+```bash
+hedis packages --update-database
+hedis packages --create-hashes
+```
+
+### App Auditing
+
+Scan a production app for known vulnerable packages:
+
+```bash
+hedis packages \
+  --analyze-with-database \
+  --compare-to-app-bundle app.bundle \
+  --output-file audit-report.txt
+```
+
+### Package Verification
+
+Verify if a specific package version is in an app:
+
+```bash
+hedis packages \
+  -s \
+  -p package@version.bundle \
+  -a app.bundle \
+  -o verification.txt
+```
+
+## Notes
+
+- This command uses a separate `clean` database (not the main `hedis` database)
+- Baseline filtering significantly improves accuracy by removing framework noise
+- Match percentages >80% indicate strong confidence the package is present
+- The database analysis output includes both per-version and per-package rankings
+- Results are sorted by combined matches (any hash type matching)

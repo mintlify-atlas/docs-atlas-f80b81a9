@@ -1,0 +1,350 @@
+---
+title: Hash Types
+description: The three complementary hash types used for function fingerprinting
+---
+
+Hedis generates three distinct hash types for each function in a Hermes bytecode bundle. These hashes work together to enable both **exact matching** and **fuzzy similarity detection** of vulnerable package code.
+
+## Overview
+
+Each function is fingerprinted using three complementary approaches:
+
+| Hash Type | Focus | Algorithm | Use Case |
+|-----------|-------|-----------|----------|
+| **Structural Hash** | Instruction flow | SHA256 + MinHash | Control-flow matching |
+| **Content IR1 Hash** | String literals | SHA256 + MinHash | Literal value matching |
+| **Content IR2 Hash** | Identifiers & objects | SHA256 + MinHash | API structure matching |
+
+All three hashes are generated from intermediate representations (IRs) created by the `ToIR()` method.
+
+See [IR Normalization](/reference/ir-normalization) for details on how IRs are generated.
+
+## Hash Type 1: Structural Hash
+
+Captures the **control-flow shape** of a function independent of concrete values.
+
+### Input
+
+Structural IR: pipe-delimited sequence of instruction names with parameter count prefix.
+
+```
+pc=2|LoadParam|LoadParam|Add|Ret|
+```
+
+### Exact Match Hash
+
+<ResponseField name="Algorithm" type="SHA256">
+  Computes SHA256 of the structural IR string
+</ResponseField>
+
+<ResponseField name="Output" type="hex string">
+  64-character hexadecimal hash
+</ResponseField>
+
+<ResponseField name="Database Field" type="string">
+  `structural_hash`
+</ResponseField>
+
+**Example:**
+
+```go
+structuralHash := sha256.Sum256([]byte(structuralIR))
+structuralHashHex := hex.EncodeToString(structuralHash[:])
+```
+
+### Fuzzy Match Hash
+
+<ResponseField name="Algorithm" type="MinHash">
+  Generates 128 hash permutations from instruction bigrams
+</ResponseField>
+
+<ResponseField name="Tokenization" type="bigrams">
+  Creates tokens like `LoadParam→Add`
+</ResponseField>
+
+<ResponseField name="Output" type="[]uint64">
+  Array of 128 hash signatures
+</ResponseField>
+
+<ResponseField name="Database Field" type="array">
+  `structural_minhash`
+</ResponseField>
+
+**Implementation:**
+
+Source: `pkg/analyzer/minhasher.go`
+
+```go
+tokens := functionObject.TokenizeStructuralIR()
+minhash := GenerateMinHash(tokens, 128)
+```
+
+**Similarity Calculation:**
+
+Jaccard similarity via MinHash signature overlap:
+
+```go
+similarity := float64(matchingHashes) / float64(totalHashes)
+```
+
+## Hash Type 2: Content IR1 Hash
+
+Captures **string literals** (non-identifier strings) used in the function.
+
+### Input
+
+Content IR1: pipe-delimited, sorted list of lowercased string literals.
+
+```
+error: connection failed|warning|timeout occurred
+```
+
+### Exact Match Hash
+
+<ResponseField name="Algorithm" type="SHA256">
+  Computes SHA256 of the content IR1 string
+</ResponseField>
+
+<ResponseField name="Output" type="hex string">
+  64-character hexadecimal hash (empty string if no literals)
+</ResponseField>
+
+<ResponseField name="Database Field" type="string">
+  `content_ir1_hash`
+</ResponseField>
+
+### Fuzzy Match Hash
+
+<ResponseField name="Algorithm" type="MinHash">
+  Generates 128 hash permutations from string tokens and trigrams
+</ResponseField>
+
+<ResponseField name="Tokenization" type="trigrams">
+  Each string ≥3 chars generates shingled tokens: `error` → `["err", "rro", "ror"]`
+</ResponseField>
+
+<ResponseField name="Output" type="[]uint64">
+  Array of 128 hash signatures
+</ResponseField>
+
+<ResponseField name="Database Field" type="array">
+  `content_ir1_minhash`
+</ResponseField>
+
+**Why Trigrams?**
+
+Trigram shingling enables partial string matching, crucial for detecting modified or obfuscated error messages and string constants.
+
+## Hash Type 3: Content IR2 Hash
+
+Captures **identifiers and object structures** referenced in the function.
+
+### Input
+
+Content IR2: pipe-delimited, sorted list of identifiers and object references.
+
+```
+apiendpoint|fetch|userconfig|{apikey: string, timeout: number}
+```
+
+### Exact Match Hash
+
+<ResponseField name="Algorithm" type="SHA256">
+  Computes SHA256 of the content IR2 string
+</ResponseField>
+
+<ResponseField name="Output" type="hex string">
+  64-character hexadecimal hash (empty string if no identifiers)
+</ResponseField>
+
+<ResponseField name="Database Field" type="string">
+  `content_ir2_hash`
+</ResponseField>
+
+### Fuzzy Match Hash
+
+<ResponseField name="Algorithm" type="MinHash">
+  Generates 128 hash permutations from identifier tokens and trigrams
+</ResponseField>
+
+<ResponseField name="Tokenization" type="trigrams">
+  Each identifier ≥3 chars generates shingled tokens
+</ResponseField>
+
+<ResponseField name="Output" type="[]uint64">
+  Array of 128 hash signatures
+</ResponseField>
+
+<ResponseField name="Database Field" type="array">
+  `content_ir2_minhash`
+</ResponseField>
+
+**Use Case:**
+
+Matches functions based on API usage patterns, even if string literals differ (e.g., internationalization).
+
+## Hash Generation Pipeline
+
+### 1. Disassemble Bytecode
+
+Parse HBC file and create `FunctionObject` representations:
+
+```go
+functionObjects, err := CreateFunctionObjects(hbcReader)
+```
+
+Source: `pkg/hbc/normalizer.go:20`
+
+### 2. Generate IRs
+
+Extract structural and content IRs:
+
+```go
+structuralIR, contentIR1, contentIR2 := functionObject.ToIR()
+```
+
+Source: `pkg/hbc/types/functionobject.go:144`
+
+### 3. Compute Hashes
+
+Generate both exact and fuzzy hashes:
+
+```go
+// Exact hashes (SHA256)
+structuralHash := sha256.Sum256([]byte(structuralIR))
+contentIR1Hash := sha256.Sum256([]byte(contentIR1))
+contentIR2Hash := sha256.Sum256([]byte(contentIR2))
+
+// Fuzzy hashes (MinHash)
+structuralTokens := functionObject.TokenizeStructuralIR()
+cir1Tokens, cir2Tokens := functionObject.TokenizeContentIRs()
+
+structuralMinHash := GenerateMinHash(structuralTokens, 128)
+cir1MinHash := GenerateMinHash(cir1Tokens, 128)
+cir2MinHash := GenerateMinHash(cir2Tokens, 128)
+```
+
+Source: `pkg/analyzer/compute.go`
+
+### 4. Store in Database
+
+Hashes are stored per package per React Native version:
+
+```go
+packageHash := &models.PackageHash{
+    PackageUniqueId:      pkg.PackageUniqueId,
+    ReactNativeVersion:   rnVersion,
+    FunctionHashes:       functionHashes,
+}
+```
+
+Source: `pkg/database/models/package_hashes_model.go`
+
+## Database Schema
+
+Each function hash document contains:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `function_name` | string | Function identifier |
+| `bytecode_size` | int | Size in bytes |
+| `param_count` | int | Number of parameters |
+| `structural_hash` | string | SHA256 of structural IR |
+| `structural_minhash` | []uint64 | MinHash signatures (128) |
+| `content_ir1_hash` | string | SHA256 of content IR1 |
+| `content_ir1_minhash` | []uint64 | MinHash signatures (128) |
+| `content_ir2_hash` | string | SHA256 of content IR2 |
+| `content_ir2_minhash` | []uint64 | MinHash signatures (128) |
+
+## Matching Strategy
+
+During analysis, functions are matched using a cascading approach:
+
+### 1. Length Pre-filtering
+
+```go
+if targetSize < minSize || targetSize > maxSize {
+    continue // Skip if bytecode size differs by >20%
+}
+```
+
+### 2. Exact Match (SHA256)
+
+```go
+if targetStructuralHash == dbStructuralHash {
+    return MatchResult{Type: "exact", Confidence: 1.0}
+}
+```
+
+### 3. Fuzzy Match (MinHash)
+
+Only if fuzzy matching is enabled (`-f` flag):
+
+```go
+similarity := ComputeJaccardSimilarity(targetMinHash, dbMinHash)
+if similarity >= threshold {
+    return MatchResult{Type: "fuzzy", Confidence: similarity}
+}
+```
+
+Source: `pkg/cmd/analyze.go`
+
+## Performance Characteristics
+
+<ResponseField name="Exact Matching" type="O(1)">
+  MongoDB indexed lookup on SHA256 hash fields
+</ResponseField>
+
+<ResponseField name="Fuzzy Matching" type="O(n)">
+  Linear scan with length pre-filtering reduces comparison space by ~80%
+</ResponseField>
+
+<ResponseField name="Storage" type="~500 bytes/function">
+  6 hash fields (3 SHA256 + 3 MinHash arrays)
+</ResponseField>
+
+## MinHash Implementation
+
+Source: `pkg/analyzer/minhasher.go`
+
+### Parameters
+
+<ResponseField name="Hash Functions" type="128">
+  Number of permutations for signature generation
+</ResponseField>
+
+<ResponseField name="Hash Algorithm" type="FNV-1a">
+  Fast non-cryptographic hash for token processing
+</ResponseField>
+
+### Algorithm
+
+```go
+func GenerateMinHash(tokens []string, numHashes int) []uint64 {
+    signature := make([]uint64, numHashes)
+    for i := 0; i < numHashes; i++ {
+        signature[i] = math.MaxUint64
+    }
+    
+    for _, token := range tokens {
+        for i := 0; i < numHashes; i++ {
+            hash := hash(token, seed[i])
+            if hash < signature[i] {
+                signature[i] = hash
+            }
+        }
+    }
+    
+    return signature
+}
+```
+
+## Use Cases by Hash Type
+
+| Scenario | Primary Hash | Fallback Hash |
+|----------|--------------|---------------|
+| Exact code match | Structural | - |
+| Renamed variables | Structural | Content IR1 |
+| Internationalized strings | Structural | Content IR2 |
+| Obfuscated code | Content IR1/IR2 | Structural |
+| Refactored code | Content IR2 | Content IR1 |

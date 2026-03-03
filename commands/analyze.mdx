@@ -1,0 +1,274 @@
+---
+title: "analyze"
+description: "Analyze HBC files for vulnerable package fingerprints using exact and fuzzy matching"
+---
+
+The `analyze` command compares Hermes bytecode files against a database of known package fingerprints to identify vulnerable dependencies. It supports both exact hash matching and fuzzy similarity-based matching using Levenshtein distance.
+
+## Usage
+
+```bash
+hedis analyze [flags]
+```
+
+## Analysis Modes
+
+The analyze command supports two primary modes:
+
+### 1. Database Analysis (Coming Soon)
+
+Compare an IPA or HBC file against the fingerprint database:
+
+```bash
+hedis analyze -i app.ipa
+hedis analyze -b index.android.bundle
+```
+
+### 2. Specific Analysis
+
+Directly compare a package HBC file against an app bundle HBC file:
+
+```bash
+hedis analyze \
+  -s \
+  -p package.bundle \
+  -a app.bundle \
+  -o results.txt
+```
+
+## Flags
+
+### Input Flags
+
+<ParamField path="-i, --ipa" type="string">
+  Path to the IPA file to analyze. The command will extract and analyze HBC files from the IPA archive.
+  
+  **Status:** Currently disabled in the codebase.
+</ParamField>
+
+<ParamField path="-b, --hbc-file" type="string">
+  Path to the HBC file to analyze directly.
+  
+  **Status:** Currently disabled in the codebase.
+</ParamField>
+
+### Specific Analysis Flags
+
+<ParamField path="-s, --specific-analysis" type="boolean" default="false">
+  Enable specific analysis mode. When enabled, compare a specific package HBC file against a specific app bundle HBC file.
+</ParamField>
+
+<ParamField path="-p, --specific-package" type="string">
+  Path to the package HBC file to analyze. **Required** when `-s` is enabled.
+</ParamField>
+
+<ParamField path="-a, --compare-to-app-bundle" type="string">
+  Path to the app bundle HBC file to compare against. **Required** when `-s` is enabled.
+</ParamField>
+
+<ParamField path="-o, --output-file" type="string">
+  Path to the output file where match results will be written.
+</ParamField>
+
+### Fuzzy Matching Configuration
+
+<ParamField path="-f, --fuzzy-matching" type="boolean" default="false">
+  Enable fuzzy matching with confidence scores. Uses Levenshtein distance to find similar functions even when exact hashes don't match.
+</ParamField>
+
+<ParamField path="-c, --confidence-threshold" type="float" default="0.8">
+  Minimum confidence threshold for fuzzy matches. Valid range: 0.0-1.0.
+  
+  - `1.0` = exact match only
+  - `0.8` = 80% similarity required (recommended)
+  - `0.6` = 60% similarity (more lenient, may have false positives)
+</ParamField>
+
+<ParamField path="--max-fuzzy-docs" type="integer" default="5000">
+  Maximum number of documents to check for fuzzy matching. Higher values increase accuracy but slow down analysis.
+</ParamField>
+
+<ParamField path="--length-tolerance" type="float" default="0.2">
+  Length tolerance for fuzzy matching (0.2 = ±20%). Only compare IR strings with compatible lengths to improve performance.
+</ParamField>
+
+## Examples
+
+### Specific Package vs App Bundle Analysis
+
+Compare a vulnerable package against an app bundle with default settings:
+
+```bash
+hedis analyze \
+  --specific-analysis \
+  --specific-package vulnerable-pkg.bundle \
+  --compare-to-app-bundle production-app.bundle \
+  --output-file analysis-results.txt
+```
+
+### High-Confidence Fuzzy Matching
+
+Perform analysis with strict fuzzy matching (90% similarity required):
+
+```bash
+hedis analyze \
+  -s \
+  -p package.bundle \
+  -a app.bundle \
+  -f \
+  -c 0.9 \
+  -o results.txt
+```
+
+### Lenient Fuzzy Matching
+
+Use lower confidence threshold for heavily obfuscated code:
+
+```bash
+hedis analyze \
+  -s \
+  -p obfuscated-package.bundle \
+  -a app.bundle \
+  -c 0.6 \
+  --length-tolerance 0.3 \
+  -o results.txt
+```
+
+### Performance-Tuned Analysis
+
+Limit fuzzy matching documents for faster analysis:
+
+```bash
+hedis analyze \
+  -s \
+  -p package.bundle \
+  -a large-app.bundle \
+  --max-fuzzy-docs 1000 \
+  -o results.txt
+```
+
+## Output Format
+
+The analysis generates a comprehensive report with exact and fuzzy match statistics:
+
+```
+Exact hash matches:
+  • Structural : 142/380 (37.37%)
+  • Content IR1: 98/245 (40.00%)
+  • Content IR2: 156/312 (50.00%)
+  ⇒ Overall    : 396/937 (42.26%)
+--------------------------------
+
+Fuzzy IR matches (≥0.80 similarity):
+  • Structural : 23/238 (9.66%)
+  • Content IR1: 15/147 (10.20%)
+  • Content IR2: 31/156 (19.87%)
+  ⇒ Overall    : 69/541 (12.75%)
+--------------------------------
+
+Structural Fuzzy Matches:
+	 LoadConstUndefined|Ret|CreateEnvironment|LoadConstUndefined|Mov
+	 GetByIdShort|StrictEq|JmpTrue|LoadConstString|CallBuiltin
+
+Content IR1 Fuzzy Matches:
+	 react_navigation|screen_title|navigate_home
+	 document_picker_canceled|file_upload_error
+```
+
+### Match Types
+
+The analysis compares three types of fingerprints:
+
+1. **Structural Hash**: SHA256 of instruction bigrams (opcode sequences)
+2. **Content IR1 Hash**: SHA256 of non-identifier strings and literals
+3. **Content IR2 Hash**: SHA256 of identifiers and object references
+
+### Interpretation
+
+- **Exact matches**: Functions with identical hashes (100% confidence)
+- **Fuzzy matches**: Functions with similar IR strings above the confidence threshold
+- **Eligible for fuzzy**: IR strings ≥30 characters that weren't exact matches
+- **Overall percentage**: Combined metric indicating likelihood the package is present
+
+<Warning>
+  Fuzzy matching is computationally expensive. For large app bundles, consider:
+  - Lowering `--max-fuzzy-docs` (default: 5000)
+  - Increasing `--length-tolerance` to filter more aggressively
+  - Increasing `--confidence-threshold` to reduce false positives
+</Warning>
+
+## How It Works
+
+### Exact Matching
+
+1. Disassemble both HBC files and extract function objects
+2. Generate IR representations and compute SHA256 hashes
+3. Compare hashes for exact equality
+
+### Fuzzy Matching
+
+1. Filter IR strings by length compatibility (±20% by default)
+2. Calculate Levenshtein distance between IR strings
+3. Convert distance to similarity score (0.0-1.0)
+4. Include matches above confidence threshold
+
+### Performance Optimizations
+
+- **Length pre-filtering**: Skip comparisons between incompatible lengths
+- **Minimum IR length**: Only match strings ≥30 characters
+- **Parallel processing**: Structural, IR1, and IR2 matching run concurrently
+- **Document limits**: Cap fuzzy matching to prevent excessive runtime
+
+## Common Use Cases
+
+### Vulnerability Detection
+
+Check if a known vulnerable package version is present in a production app:
+
+```bash
+hedis analyze \
+  -s \
+  -p react-native-device-info@8.1.0.bundle \
+  -a production-app.bundle \
+  -o vulnerability-check.txt
+```
+
+### Supply Chain Auditing
+
+Analyze multiple packages against an app bundle:
+
+<CodeGroup>
+```bash Package 1
+hedis analyze -s -p pkg1.bundle -a app.bundle -o pkg1-results.txt
+```
+
+```bash Package 2
+hedis analyze -s -p pkg2.bundle -a app.bundle -o pkg2-results.txt
+```
+
+```bash Package 3
+hedis analyze -s -p pkg3.bundle -a app.bundle -o pkg3-results.txt
+```
+</CodeGroup>
+
+### Code Similarity Analysis
+
+Compare two different versions of the same package:
+
+```bash
+hedis analyze \
+  -s \
+  -p package-v1.0.0.bundle \
+  -a package-v2.0.0.bundle \
+  -c 0.7 \
+  -o version-diff.txt
+```
+
+## Notes
+
+- Database analysis mode (`-i`, `-b`) is currently disabled in the codebase
+- Specific analysis mode (`-s`) is the primary working mode
+- Both package and app bundle files must be valid HBC files
+- Results are most accurate when both bundles use the same Hermes version
+- High match percentages (>40% combined) indicate strong likelihood of package presence
+- Consider baseline React Native functions when interpreting results

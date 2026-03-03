@@ -1,0 +1,643 @@
+---
+title: Troubleshooting
+description: Common issues and solutions when using Hedis
+---
+
+This guide covers common errors and issues you may encounter when using Hedis, along with their solutions.
+
+## Installation Issues
+
+### Go Build Failures
+
+**Symptom:**
+
+```
+go: module not found
+build failed
+```
+
+**Causes:**
+- Missing dependencies
+- Incorrect Go version
+- Module cache corruption
+
+**Solution:**
+
+```bash
+# Verify Go version (requires 1.23+)
+go version
+
+# Clean module cache
+go clean -modcache
+
+# Download dependencies
+cd go/hermes-decompiler
+go mod download
+go mod tidy
+
+# Rebuild
+go build -o hermes-decompiler .
+```
+
+### Node.js Dependency Errors
+
+**Symptom:**
+
+```
+npm ERR! code ENOENT
+npm ERR! syscall open
+```
+
+**Solution:**
+
+```bash
+# Clean npm cache
+npm cache clean --force
+
+# Reinstall dependencies
+cd js/dependency-resolver
+rm -rf node_modules package-lock.json
+npm install
+
+cd ../get-packages
+rm -rf node_modules package-lock.json
+npm install
+```
+
+## MongoDB Connection Errors
+
+### Connection Refused
+
+**Symptom:**
+
+```
+MONGO_CONNECTION_STRING is not set
+exit status 1
+```
+
+**Solution:**
+
+1. **Verify `.env` file exists:**
+
+```bash
+ls -la go/hermes-decompiler/.env
+```
+
+2. **Check connection string format:**
+
+```bash
+# .env file
+MONGO_CONNECTION_STRING=mongodb://localhost:27017
+```
+
+3. **Test MongoDB connection:**
+
+```bash
+mongosh "$MONGO_CONNECTION_STRING"
+```
+
+4. **Start MongoDB if not running:**
+
+```bash
+# Docker
+docker start hedis-mongo
+
+# Or start new container
+docker run -d -p 27017:27017 --name hedis-mongo mongo:latest
+
+# Local installation
+mongod --dbpath /path/to/data
+```
+
+### Authentication Failed
+
+**Symptom:**
+
+```
+failed to connect to MongoDB: authentication failed
+```
+
+**Solution:**
+
+Update connection string with credentials:
+
+```bash
+# .env file
+MONGO_CONNECTION_STRING=mongodb://username:password@localhost:27017/hedis?authSource=admin
+```
+
+Test authentication:
+
+```bash
+mongosh "mongodb://username:password@localhost:27017/hedis?authSource=admin"
+```
+
+### Database Not Found
+
+**Symptom:**
+
+```
+database "hedis" does not exist
+```
+
+**Solution:**
+
+MongoDB creates databases on first write. Run database initialization:
+
+```bash
+cd go/hermes-decompiler
+./hermes-decompiler maintain-database -b
+```
+
+Or verify database name in `.env`:
+
+```bash
+MONGO_DB_NAME=hedis
+```
+
+## Disassembly Errors
+
+### Unsupported Bytecode Version
+
+**Symptom:**
+
+```
+Warning: This file uses a future Hermes bytecode format, which is not yet supported [97].
+```
+
+**Cause:**
+
+HBC file uses a bytecode version newer than v96.
+
+**Solution:**
+
+1. **Check file bytecode version:**
+
+```bash
+hexdump -C bundle.hbc | head -n 5
+```
+
+Look for version number after magic bytes `1F 19 03 C1 03 BC 1F C6`.
+
+2. **Add support for the new version:**
+
+See [Contributing: Adding Bytecode Support](/development/contributing#adding-bytecode-support).
+
+3. **Fallback to older parser:**
+
+Hedis automatically uses the closest older parser version (e.g., v97 uses v96 parser). This may work if opcodes haven't changed significantly.
+
+### Opcode Not Implemented
+
+**Symptom:**
+
+```
+opcode 0xAB is not implemented
+```
+
+**Cause:**
+
+Bytecode contains an opcode not defined in the selected parser version.
+
+**Solution:**
+
+1. **Verify bytecode version matches parser:**
+
+```bash
+# Check which parser is being used
+go run main.go disassemble -i bundle.hbc -o output.txt
+```
+
+2. **Regenerate opcode definitions:**
+
+```bash
+cd go/hermes-decompiler
+sh pkg/utils/download_all.sh
+go run main.go genopcodes
+```
+
+3. **File a bug report** if the issue persists with the correct parser version.
+
+### Invalid HBC File
+
+**Symptom:**
+
+```
+failed to read HBC header: unexpected EOF
+invalid magic number
+```
+
+**Cause:**
+
+File is not a valid Hermes bytecode file or is corrupted.
+
+**Solution:**
+
+1. **Verify file is HBC:**
+
+```bash
+file bundle.hbc
+hexdump -C bundle.hbc | head -n 5
+```
+
+Valid HBC files start with: `1F 19 03 C1 03 BC 1F C6`
+
+2. **Extract HBC from IPA:**
+
+If analyzing an iOS app, extract the HBC bundle first:
+
+```bash
+unzip app.ipa
+find Payload -name "*.hbc"
+```
+
+3. **Recompile JavaScript:**
+
+If you have the source:
+
+```bash
+hermesc -emit-binary -out bundle.hbc index.js
+```
+
+## Analysis Errors
+
+### No Matches Found
+
+**Symptom:**
+
+```
+Analysis complete: 0 packages matched
+```
+
+**Causes:**
+- Empty or outdated database
+- App uses a different React Native version
+- Code is heavily obfuscated
+
+**Solution:**
+
+1. **Check database population:**
+
+```bash
+mongosh "$MONGO_CONNECTION_STRING"
+use hedis
+db.hashes.countDocuments()
+```
+
+2. **Build database fingerprints:**
+
+```bash
+cd go/hermes-decompiler
+./hermes-decompiler maintain-database -b  # Generate baselines
+./hermes-decompiler maintain-database -p  # Process packages
+```
+
+3. **Enable fuzzy matching:**
+
+```bash
+./hermes-decompiler analyze -b bundle.hbc -f -c 0.7
+```
+
+Lower confidence threshold to 0.7 for more matches.
+
+4. **Check React Native version compatibility:**
+
+Hedis database covers RN versions 0.69–0.79. Apps using different versions may not match.
+
+### Low Confidence Matches
+
+**Symptom:**
+
+```
+Matched package "lodash@4.17.21" with confidence 0.45
+```
+
+**Cause:**
+
+Code may be partially modified, obfuscated, or use different build settings.
+
+**Solution:**
+
+1. **Adjust confidence threshold:**
+
+```bash
+./hermes-decompiler analyze -b bundle.hbc -f -c 0.4
+```
+
+2. **Use specific package comparison:**
+
+```bash
+./hermes-decompiler analyze -s \
+  -p lodash.hbc \
+  -a app-bundle.hbc
+```
+
+3. **Review match details:**
+
+Check which hash types matched:
+- Structural matches indicate same control flow
+- Content IR1 matches indicate same string literals
+- Content IR2 matches indicate same API usage
+
+### Memory Issues
+
+**Symptom:**
+
+```
+fatal error: out of memory
+runtime: out of memory
+```
+
+**Cause:**
+
+Large HBC files or processing many packages simultaneously.
+
+**Solution:**
+
+1. **Increase available memory:**
+
+```bash
+# Docker
+docker run -m 8g hedis analyze -b bundle.hbc
+
+# Kubernetes
+resources:
+  limits:
+    memory: 8Gi
+```
+
+2. **Process packages in smaller batches:**
+
+Edit batch size in `pkg/pipeline/batcher.go`:
+
+```go
+const DefaultBatchSize = 50  // Reduce from 100
+```
+
+3. **Enable swap space** (Linux):
+
+```bash
+sudo fallocate -l 4G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+```
+
+## Pipeline Errors
+
+### Package Processing Failures
+
+**Symptom:**
+
+```
+Package group lodash had 5 errors out of 10 versions
+all packages failed for RN version rn069: 50 errors
+```
+
+**Causes:**
+- npm install failures
+- Hermes compilation errors
+- Missing dependencies
+
+**Solution:**
+
+1. **Check pipeline progress:**
+
+```bash
+cat go/hermes-decompiler/pipeline_progress.json
+```
+
+2. **Resume from failure:**
+
+```bash
+./hermes-decompiler maintain-database -p
+```
+
+The pipeline automatically resumes from `pipeline_progress.json`.
+
+3. **Check failed package logs:**
+
+```bash
+jq '.rn_environments["rn069"].failed_packages' pipeline_progress.json
+```
+
+4. **Manually test package:**
+
+```bash
+cd pipeline/react-natives/rn069
+npm install lodash@4.17.21
+npm run build
+```
+
+### Hermes Compiler Not Found
+
+**Symptom:**
+
+```
+failed to execute hermesc: no such file or directory
+```
+
+**Cause:**
+
+`OS_HERMES` environment variable not set or incorrect.
+
+**Solution:**
+
+1. **Set OS_HERMES in `.env`:**
+
+```bash
+# macOS
+OS_HERMES=osx-bin
+
+# Linux
+OS_HERMES=linux64-bin
+```
+
+2. **Verify Hermes binary exists:**
+
+```bash
+ls -la pipeline/react-natives/rn069/node_modules/hermes-engine/$OS_HERMES/hermesc
+```
+
+3. **Reinstall React Native environment:**
+
+```bash
+cd pipeline/react-natives/rn069
+rm -rf node_modules
+npm install
+```
+
+### Metro Bundler Errors
+
+**Symptom:**
+
+```
+error: bundling failed
+TransformError: Cannot find module 'lodash'
+```
+
+**Cause:**
+
+Package not properly installed or Metro cache corruption.
+
+**Solution:**
+
+1. **Clear Metro cache:**
+
+```bash
+cd pipeline/react-natives/rn069
+rm -rf .metro-cache
+npm run build
+```
+
+2. **Reset environment:**
+
+```bash
+cd pipeline/react-natives/rn069
+rm -rf node_modules .metro-cache
+npm install
+npm run build
+```
+
+## GitHub API Errors
+
+### Rate Limiting
+
+**Symptom:**
+
+```
+GitHub API returned status 403: rate limit exceeded
+```
+
+**Cause:**
+
+GitHub API rate limit reached (60 requests/hour without token, 5000/hour with token).
+
+**Solution:**
+
+1. **Set GITHUB_TOKEN:**
+
+```bash
+# .env file
+GITHUB_TOKEN=ghp_your_token_here
+```
+
+2. **Check rate limit status:**
+
+```bash
+curl -H "Authorization: Bearer $GITHUB_TOKEN" \
+  https://api.github.com/rate_limit
+```
+
+3. **Wait for reset:**
+
+Rate limits reset hourly. Check `X-RateLimit-Reset` header.
+
+### Authentication Failed
+
+**Symptom:**
+
+```
+GITHUB_TOKEN environment variable is not set
+```
+
+**Solution:**
+
+1. **Generate GitHub token:**
+
+Go to [GitHub Settings > Developer settings > Personal access tokens](https://github.com/settings/tokens)
+
+2. **Set token with required scope:**
+
+```bash
+# Requires 'public_repo' scope
+GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890
+```
+
+3. **Verify token:**
+
+```bash
+curl -H "Authorization: Bearer $GITHUB_TOKEN" \
+  https://api.github.com/user
+```
+
+## Performance Issues
+
+### Slow Disassembly
+
+**Symptom:**
+
+Disassembly takes >5 minutes for a large HBC file.
+
+**Solution:**
+
+1. **Disable unnecessary output:**
+
+```bash
+# Only output functions, skip strings and objects
+./hermes-decompiler disassemble -i bundle.hbc -f
+```
+
+2. **Use binary output mode** (if available):
+
+```bash
+./hermes-decompiler disassemble -i bundle.hbc -o output.bin --binary
+```
+
+3. **Process in parallel** (for multiple files):
+
+```bash
+find . -name "*.hbc" | xargs -P 4 -I {} \
+  ./hermes-decompiler disassemble -i {} -o {}.txt
+```
+
+### Slow Analysis
+
+**Symptom:**
+
+Analysis takes >30 minutes.
+
+**Cause:**
+
+Fuzzy matching scans entire database.
+
+**Solution:**
+
+1. **Disable fuzzy matching:**
+
+```bash
+./hermes-decompiler analyze -b bundle.hbc
+```
+
+2. **Increase MongoDB indexes:**
+
+```javascript
+mongosh "$MONGO_CONNECTION_STRING"
+use hedis
+db.hashes.createIndex({ "structural_hash": 1 })
+db.hashes.createIndex({ "content_ir1_hash": 1 })
+db.hashes.createIndex({ "content_ir2_hash": 1 })
+```
+
+3. **Filter by React Native version:**
+
+If you know the app's RN version, query only that version's hashes.
+
+## Getting More Help
+
+If your issue isn't covered here:
+
+1. **Check GitHub Issues:** [github.com/your-org/hedis/issues](https://github.com/your-org/hedis/issues)
+2. **Enable debug logging:**
+
+```bash
+export DEBUG=1
+./hermes-decompiler analyze -b bundle.hbc
+```
+
+3. **File a bug report** with:
+   - Hedis version (`./hermes-decompiler --version`)
+   - Operating system and version
+   - Full error message and stack trace
+   - Steps to reproduce
+   - Sample HBC file (if possible)

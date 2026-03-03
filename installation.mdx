@@ -1,0 +1,251 @@
+---
+title: Installation
+description: Install Hedis and its dependencies
+---
+
+## Prerequisites
+
+Hedis requires three runtime dependencies:
+
+- **Go** 1.23 or higher
+- **MongoDB** — Stores function fingerprints and package metadata
+- **Node.js** — Required for JavaScript utilities (dependency resolution and package fetching)
+
+## Install Go
+
+You need Go 1.23 or higher to build and run Hedis.
+
+<CodeGroup>
+
+```bash macOS (Homebrew)
+brew install go
+```
+
+```bash Linux (apt)
+sudo apt update
+sudo apt install golang-go
+```
+
+```bash Linux (manual)
+# Download and install Go 1.23+
+wget https://go.dev/dl/go1.23.0.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go1.23.0.linux-amd64.tar.gz
+export PATH=$PATH:/usr/local/go/bin
+```
+
+```bash Windows (Chocolatey)
+choco install golang
+```
+
+</CodeGroup>
+
+Verify your installation:
+
+```bash
+go version
+# Output: go version go1.23.0 ...
+```
+
+## Install MongoDB
+
+Hedis uses MongoDB to store function fingerprints and package metadata. You can run MongoDB locally or use a cloud instance.
+
+<Tabs>
+  <Tab title="Docker (recommended)">
+    The fastest way to get MongoDB running is with Docker:
+
+    ```bash
+    docker run -d \
+      --name hedis-mongo \
+      -p 27017:27017 \
+      -e MONGO_INITDB_ROOT_USERNAME=hedis \
+      -e MONGO_INITDB_ROOT_PASSWORD=hedis \
+      mongo:latest
+    ```
+
+    Your connection string will be:
+    ```
+    mongodb://hedis:hedis@localhost:27017
+    ```
+  </Tab>
+
+  <Tab title="macOS">
+    Install with Homebrew:
+
+    ```bash
+    brew tap mongodb/brew
+    brew install mongodb-community
+    brew services start mongodb-community
+    ```
+
+    Your connection string will be:
+    ```
+    mongodb://localhost:27017
+    ```
+  </Tab>
+
+  <Tab title="Linux">
+    Install on Ubuntu/Debian:
+
+    ```bash
+    wget -qO - https://www.mongodb.org/static/pgp/server-7.0.asc | sudo apt-key add -
+    echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+    sudo apt update
+    sudo apt install -y mongodb-org
+    sudo systemctl start mongod
+    sudo systemctl enable mongod
+    ```
+
+    Your connection string will be:
+    ```
+    mongodb://localhost:27017
+    ```
+  </Tab>
+
+  <Tab title="MongoDB Atlas">
+    Use a free MongoDB Atlas cluster:
+
+    1. Sign up at [mongodb.com/cloud/atlas](https://www.mongodb.com/cloud/atlas)
+    2. Create a free cluster
+    3. Add your IP to the access list
+    4. Create a database user
+    5. Copy your connection string
+
+    Your connection string will look like:
+    ```
+    mongodb+srv://<username>:<password>@cluster0.xxxxx.mongodb.net
+    ```
+  </Tab>
+</Tabs>
+
+## Install Node.js
+
+Node.js is required for the JavaScript utilities included with Hedis.
+
+<CodeGroup>
+
+```bash macOS (Homebrew)
+brew install node
+```
+
+```bash Linux (apt)
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt-get install -y nodejs
+```
+
+```bash Windows (Chocolatey)
+choco install nodejs
+```
+
+</CodeGroup>
+
+Verify your installation:
+
+```bash
+node --version
+# Output: v20.x.x
+```
+
+## Build Hedis
+
+Clone the repository and build the binary:
+
+```bash
+git clone https://github.com/yourusername/hedis.git
+cd hedis/go/hermes-decompiler
+
+# Build the binary
+go build -o hermes-decompiler .
+```
+
+<Tip>
+  All Go commands must be run from the `go/hermes-decompiler/` directory.
+</Tip>
+
+Verify the build:
+
+```bash
+./hermes-decompiler --help
+```
+
+## Configure environment
+
+Create a `.env` file in `go/hermes-decompiler/` with your configuration:
+
+```bash .env
+# MongoDB connection
+MONGO_CONNECTION_STRING=mongodb://localhost:27017
+MONGO_DB_NAME=hedis
+
+# Hermes binary platform (osx-bin for macOS, linux64-bin for Linux)
+OS_HERMES=osx-bin
+
+# GitHub personal access token (required for security advisory API)
+GITHUB_TOKEN=ghp_your_token_here
+```
+
+<Warning>
+  The `.env` file is automatically loaded via `godotenv/autoload`. Never commit this file to version control.
+</Warning>
+
+### Environment variables
+
+| Variable | Description | Example |
+|---|---|---|
+| `MONGO_CONNECTION_STRING` | MongoDB connection URI | `mongodb://localhost:27017` |
+| `MONGO_DB_NAME` | Database name | `hedis` (default) |
+| `OS_HERMES` | Hermes binary platform | `osx-bin` or `linux64-bin` |
+| `GITHUB_TOKEN` | GitHub PAT for Security Advisory API | `ghp_...` |
+
+### Get a GitHub token
+
+You need a GitHub personal access token to query the Security Advisory API:
+
+1. Go to [github.com/settings/tokens](https://github.com/settings/tokens)
+2. Click "Generate new token (classic)"
+3. Select scopes: `public_repo`, `read:packages`
+4. Copy your token to the `.env` file
+
+## Database collections
+
+Hedis creates three MongoDB collections:
+
+| Collection | Purpose |
+|---|---|
+| `packages` | npm package metadata |
+| `hashes` / `hashes_ghsa` | Function fingerprints per package per RN version |
+| `baselines_v3` | Empty RN app fingerprints (filters framework functions) |
+
+<Note>
+  These collections are created automatically when you run the `maintain-database` command.
+</Note>
+
+## Verify installation
+
+Test your setup by disassembling a sample `.hbc` file:
+
+```bash
+# Run a test command
+./hermes-decompiler disassemble -i sample.hbc -o output.txt
+```
+
+If you see output without errors, your installation is complete!
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card
+    title="Quick start"
+    icon="rocket"
+    href="/quickstart"
+  >
+    Analyze your first React Native app
+  </Card>
+  <Card
+    title="Commands"
+    icon="terminal"
+    href="/commands/disassemble"
+  >
+    Learn about all available commands
+  </Card>
+</CardGroup>

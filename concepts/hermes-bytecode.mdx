@@ -1,0 +1,182 @@
+---
+title: Hermes Bytecode Format
+description: Understanding the Hermes bytecode file format, versions, and structure
+---
+
+## Overview
+
+Hermes bytecode (.hbc files) is a compact binary format produced by the Hermes JavaScript engine when compiling JavaScript code for React Native applications. Hedis supports **27 bytecode versions** (v61-v96), covering Hermes releases from v0.1.0 to current.
+
+## Magic Number
+
+Every valid Hermes bytecode file starts with an 8-byte magic number:
+
+```
+0x1F1903C103BC1FC6
+```
+
+This value encodes the Unicode string 'Ἑρμῆ' ("Hermēs" in Greek) as UTF-16BE. Hedis uses this magic number to identify HBC files in IPA archives.
+
+<Note>
+The magic number must match exactly. If the first 8 bytes don't match `HeaderMagic`, the file is not a valid Hermes bytecode file.
+</Note>
+
+## File Header Structure
+
+The HBC header contains metadata about the file's contents and guides subsequent parsing:
+
+```go
+type HBCHeader struct {
+    Magic                        uint64
+    Version                      uint32
+    SourceHash                   [20]byte  // SHA1 hash
+    FileLength                   uint32
+    GlobalCodeIndex              uint32
+    FunctionCount                uint32
+    StringKindCount              uint32
+    IdentifierCount              uint32
+    StringCount                  uint32
+    OverflowStringCount          uint32
+    StringStorageSize            uint32
+    BigIntCount                  uint32    // v87+
+    BigIntStorageSize            uint32    // v87+
+    RegExpCount                  uint32
+    RegExpStorageSize            uint32
+    ArrayBufferSize              uint32
+    ObjKeyBufferSize             uint32
+    ObjValueBufferSize           uint32
+    SegmentID                    uint32
+    CjsModuleCount               uint32
+    FunctionSourceCount          uint32    // v84+
+    DebugInfoOffset              uint32
+    StaticBuiltins               bool
+    CjsModulesStaticallyResolved bool
+    HasAsync                     bool
+}
+```
+
+### Version-Specific Fields
+
+The header layout varies by bytecode version:
+
+- **BigIntCount** and **BigIntStorageSize** — Only present in bytecode version ≥ 87 (Hermes v0.12.0+)
+- **FunctionSourceCount** — Only present in bytecode version ≥ 84 (Hermes v0.8.1+)
+- **SegmentID** — Called `CjsModuleOffset` before bytecode version 78
+
+<Info>
+After reading the header, Hedis aligns to a 32-byte boundary before reading the first data section.
+</Info>
+
+## SHA1 Integrity Check
+
+For bytecode version ≥ 75, Hermes appends a 20-byte SHA1 hash of the file body as a footer. Hedis verifies this hash during header parsing to ensure file integrity:
+
+```go
+hash := sha1.Sum(fileData[:len(fileData)-20])
+if !bytes.Equal(hash[:], fileData[len(fileData)-20:]) {
+    return fmt.Errorf("SHA1 hash verification failed")
+}
+```
+
+## Bytecode Versions
+
+Hedis maintains opcode definitions for each supported bytecode version in `pkg/hbc/types/opcodes/bcvXX/`. The version determines:
+
+- **Opcode mappings** — Instruction set varies between versions
+- **Header layout** — Conditional fields as described above
+- **String encoding** — String table format changed in v56 and v71
+- **CJS module format** — Changed in v77
+- **Debug info layout** — Changed in v91
+
+### Version Detection
+
+When parsing a file, Hedis reads the version from the header and selects the appropriate parser:
+
+```go
+func (h *HBCReader) InitParserModule() error {
+    if h.Header.Version == 0 {
+        return fmt.Errorf("header must be read before init parser module")
+    }
+    
+    h.ParserModule = GetParser(int(h.Header.Version))
+    if h.ParserModule == nil {
+        return fmt.Errorf("no parser module available for bcv %d", h.Header.Version)
+    }
+    
+    return nil
+}
+```
+
+<Tip>
+To add support for a new bytecode version:
+1. Run `sh pkg/utils/download_all.sh` to download Hermes definitions
+2. Run `go run main.go genopcodes` to generate opcode files
+3. Register the new version in `GetParser` method
+</Tip>
+
+## File Sections
+
+After the header, the HBC file contains these sections in order:
+
+1. **Function Headers** — Small (16-byte) or Large (32-byte) headers for each function
+2. **String Kinds** — Run-length encoded classification (String vs Identifier)
+3. **Identifier Hashes** — Hash values for string table lookups
+4. **Small String Table** — Bit-packed entries with offset/length/encoding
+5. **Overflow String Table** — Full offset/length pairs for long strings
+6. **String Storage** — Raw string bytes (UTF-16 or Latin-1)
+7. **Arrays** — Serialized array literals
+8. **BigInts** — Variable-length signed integers (v87+)
+9. **RegExp** — Regular expression patterns and storage
+10. **CJS Modules** — CommonJS module references
+11. **Function Sources** — Function ID to source string mapping (v84+)
+12. **Debug Info** — Source maps, scope descriptors, filenames
+
+Each section is aligned to a 4-byte or 32-byte boundary depending on its type.
+
+## Function Headers
+
+Functions use a compact 16-byte bit-packed header format:
+
+```go
+type SmallFunctionHeader struct {
+    Offset                 uint32 // 25 bits
+    ParamCount             uint8  // 7 bits
+    BytecodeSizeInBytes    uint16 // 15 bits
+    FunctionName           uint32 // 17 bits
+    InfoOffset             uint32 // 25 bits
+    FrameSize              uint8  // 7 bits
+    EnvironmentState       uint8
+    HighestReadCacheIndex  uint8
+    HighestWriteCacheIndex uint8
+    ProhibitInvoke         uint8  // 2 bits
+    StrictMode             bool   // 1 bit
+    HasExceptionHandler    bool   // 1 bit
+    HasDebugInfo           bool   // 1 bit
+    Overflowed             bool   // 1 bit
+}
+```
+
+When `Overflowed` is true, the offset fields point to a 32-byte `LargeFunctionHeader` with full uint32 fields.
+
+## String Encoding
+
+Strings are stored with two-level indirection:
+
+1. **Small String Table Entry** (4 bytes, bit-packed):
+   - 1 bit: IsUTF16 flag
+   - 23 bits: Offset into string storage (or overflow table index if Length = 0xFF)
+   - 8 bits: Length in characters
+
+2. **String Storage**: Raw bytes in either:
+   - UTF-16 little-endian with surrogate pair handling for code points above U+FFFF
+   - Latin-1 (one byte per character)
+
+<Note>
+The string table bit layout changed in bytecode version 56. Earlier versions included a 1-bit IsIdentifier flag, reducing the offset field to 22 bits.
+</Note>
+
+## Related Sections
+
+- [Fingerprinting](/concepts/fingerprinting) — How Hedis extracts hashes from bytecode
+- [Fuzzy Matching](/concepts/fuzzy-matching) — Similarity detection beyond exact matches
+- [Database Schema](/concepts/database-schema) — MongoDB collections storing bytecode fingerprints

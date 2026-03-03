@@ -1,0 +1,64 @@
+---
+title: Bachelor Thesis
+description: Research context and academic foundation of Hedis
+---
+
+## Overview
+
+Hedis was developed as part of a bachelor thesis at TU Darmstadt titled **"Evaluating Dependency Vulnerabilities in React Native Applications"**. The research presents a novel approach to identifying security risks in production mobile applications through static analysis of compiled bytecode.
+
+## Research Context
+
+The thesis addresses a critical gap in mobile application security: detecting vulnerable JavaScript dependencies in production React Native applications without access to source code. Traditional dependency scanning tools require the original `package.json` or source files, which are not available for apps distributed through app stores.
+
+<Note>
+The full thesis is available at: [doi.org/10.26083/tuprints-00031438](https://doi.org/10.26083/tuprints-00031438)
+</Note>
+
+## Key Contributions
+
+The research makes several important contributions to the field of mobile application security:
+
+### Static Analysis Pipeline
+
+The thesis presents a **novel static analysis pipeline** that works by:
+
+1. **Constructing a reference database** of npm package fingerprints extracted from disassembled Hermes bytecode
+2. **Matching fingerprints** against real-world application bundles obtained from the iOS App Store
+3. **Detecting vulnerable dependencies** at a coarse-grained level across different React Native versions and build configurations
+
+### Bytecode Fingerprinting
+
+The approach introduces a multi-dimensional fingerprinting system that extracts function-level signatures from Hermes bytecode:
+
+- **Structural hashes** based on instruction sequences
+- **Content hashes** capturing string literals and identifiers
+- **Fuzzy matching** capabilities to handle code transformations and optimizations
+
+### Cross-Version Compatibility
+
+The pipeline supports 30 different Hermes bytecode versions (v61–v96), covering React Native releases from early versions through current production builds. This broad compatibility ensures the tool remains effective across the diverse landscape of deployed applications.
+
+## Academic Impact
+
+This research demonstrates the feasibility of performing supply chain security analysis on compiled mobile applications, opening new avenues for:
+
+- **Large-scale security audits** of app store ecosystems
+- **Vulnerability tracking** in production applications
+- **Developer awareness** of dependency risks in mobile development
+
+The thesis bridges the gap between traditional software composition analysis and the realities of mobile app distribution, where source code is intentionally obfuscated and compiled.
+
+## Related Work
+
+The implementation was inspired by [P1Sec/hermes-dec](https://github.com/P1Sec/hermes-dec), building upon existing Hermes decompilation techniques and extending them with a comprehensive fingerprinting and matching system.
+
+## Citation
+
+If you use Hedis in academic research, please cite the thesis:
+
+```
+"Evaluating Dependency Vulnerabilities in React Native Applications"
+Bachelor Thesis, TU Darmstadt
+DOI: 10.26083/tuprints-00031438
+```

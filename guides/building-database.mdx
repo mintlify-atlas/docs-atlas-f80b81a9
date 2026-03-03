@@ -1,0 +1,332 @@
+---
+title: Building the Database
+description: Guide for building the fingerprint database from npm packages
+---
+
+The Hedis fingerprint database stores SHA256 hashes of function bytecode for npm packages across multiple React Native versions. This guide explains how to build and maintain the database.
+
+## Overview
+
+The database-building pipeline (from `pkg/pipeline/`) executes these steps for each package version across 11 React Native environments:
+
+1. **Install** the npm package into a React Native project
+2. **Bundle** with Metro (creates a JavaScript bundle)
+3. **Compile** with the Hermes compiler (produces `.hbc` bytecode)
+4. **Disassemble** to extract function objects
+5. **Hash** all functions (structural, content IR1, content IR2)
+6. **Store** fingerprints in MongoDB
+
+## Prerequisites
+
+<Steps>
+  <Step title="Install dependencies">
+    ```bash
+    # Go 1.23+
+    go version
+
+    # MongoDB running on localhost:27017 or remote
+    mongosh --version
+
+    # Node.js for Metro bundler
+    node --version
+    ```
+  </Step>
+
+  <Step title="Configure environment">
+    Create `.env` in `go/hermes-decompiler/`:
+    ```bash
+    MONGO_CONNECTION_STRING=mongodb://localhost:27017
+    MONGO_DB_NAME=hedis
+    OS_HERMES=osx-bin  # or linux64-bin
+    ```
+    See [Configuration](/guides/configuration) for details.
+  </Step>
+
+  <Step title="Set up React Native environments">
+    The pipeline requires pre-configured RN projects in `pipeline/react-natives/`:
+    ```
+    pipeline/react-natives/
+    ├── rn069/  # React Native 0.69
+    ├── rn070/  # React Native 0.70
+    ├── rn071/
+    ...
+    └── rn079/  # React Native 0.79
+    ```
+    Each directory contains a complete RN project with Metro and Hermes.
+  </Step>
+</Steps>
+
+## Generating Baselines
+
+Baselines capture the fingerprints of an empty React Native app (framework-only functions). These are used to filter out RN internals during analysis.
+
+```bash
+hermes-decompiler maintain-database -b
+```
+
+**What it does** (from `pkg/cmd/maintainDatabase.go:47`):
+- Scans `pipeline/react-natives/` for RN versions
+- For each version without a baseline in `baselines_v3`:
+  1. Bundles `baseline_entry.js` (empty entry point)
+  2. Compiles with Hermes
+  3. Extracts function fingerprints
+  4. Stores in MongoDB `baselines_v3` collection
+
+**Example output:**
+```
+React Native 0.75 missing baseline -> running pipeline
+Metro bundled successfully to baseline_out_0.75.js
+Hermes compiled successfully to baseline-0.75.hbc
+Baseline database entry added to database
+```
+
+## Processing Packages
+
+The main pipeline processes npm packages across all React Native environments in parallel.
+
+### Basic Pipeline Run
+
+```bash
+hermes-decompiler maintain-database -p
+```
+
+This reads package metadata from `react-native-directory-packages.json` and processes each package version.
+
+### Package Source Files
+
+Create a JSON file listing packages to process:
+
+```json
+[
+  {
+    "package_name": "react-native-image-picker",
+    "package_version": ["4.8.0", "4.9.0", "5.0.0"],
+    "package_repository": "https://github.com/react-native-image-picker/react-native-image-picker"
+  },
+  {
+    "package_name": "@react-navigation/native",
+    "package_version": ["6.0.11", "6.1.0"]
+  }
+]
+```
+
+Save as `react-native-directory-packages.json` in `go/hermes-decompiler/`.
+
+### Processing Vulnerable Packages
+
+To process packages from GitHub Security Advisories instead:
+
+```bash
+hermes-decompiler maintain-database -p -c
+```
+
+The `-c` flag switches to the `hashes_ghsa` collection and reads from `security-advisories-packages.json`.
+
+## Pipeline Architecture
+
+### Parallel Processing
+
+The pipeline processes multiple React Native versions concurrently (from `pkg/pipeline/rnprocessor.go:108`):
+
+- **Semaphore-limited goroutines:** Max 4 RN environments processed simultaneously
+- **Package grouping:** All versions of a package are processed together to minimize `npm install` churn
+- **Database batching:** Writes are batched (100 operations per flush) for efficiency
+
+**Example progress:**
+```
+Processing React Native version 0.75: 42 pending packages (total 150)
+Grouped 42 pending packages into 8 package names for RN 0.75
+Processing package group: react-native-image-picker (3 versions)
+  Package react-native-image-picker@4.8.0 processed successfully
+  Package react-native-image-picker@4.9.0 processed successfully
+Completed package react-native-image-picker: processed 3 versions, 3 successful
+```
+
+### Resume Capability
+
+The pipeline saves progress to `pipeline_progress.json` for crash recovery (from `pkg/pipeline/progress.go`):
+
+```json
+{
+  "rn_environments": {
+    "rn075": {
+      "total_packages": 150,
+      "completed_packages": 42,
+      "failed_packages": 2,
+      "completed_package_ids": [
+        "react-native-image-picker@4.8.0",
+        "@react-navigation/native@6.0.11"
+      ]
+    }
+  }
+}
+```
+
+If the pipeline crashes, rerun the same command — it will skip completed packages.
+
+### Environment Cleanup
+
+Before processing each package group, the pipeline restores a pristine `node_modules` backup to prevent dependency conflicts:
+
+```go
+// From pkg/pipeline/rnprocessor.go:159
+if err := RestoreFromBackup(reactNativeWorkingDirectoryPath); err != nil {
+  // Skip package group on restore failure
+}
+```
+
+## Database Schema
+
+### Collections
+
+| Collection | Purpose | Document Count (typical) |
+|---|---|---|
+| `packages` | npm package metadata | ~1,000 packages |
+| `hashes` | Function fingerprints per package per RN version | ~500,000 functions |
+| `hashes_ghsa` | Fingerprints for vulnerable packages only | ~50,000 functions |
+| `baselines_v3` | Empty RN app fingerprints (11 versions) | ~11 documents |
+
+### Package Hash Model
+
+```go
+// From pkg/database/models/
+type PackageHashModel struct {
+  ID                 primitive.ObjectID
+  PackageID          primitive.ObjectID  // References packages collection
+  ReactNativeVersion string              // e.g., "0.75"
+  Hash               Hash                // Structural, ContentIR1, ContentIR2
+}
+
+type Hash struct {
+  RelativeFunctionIndex int
+  StructuralRaw         string  // IR bigram sequence
+  ContentIR1Raw         string  // String literals
+  ContentIR2Raw         string  // Identifiers
+  StructuralHash        string  // SHA256 of StructuralRaw
+  ContentIR1Hash        string  // SHA256 of ContentIR1Raw
+  ContentIR2Hash        string  // SHA256 of ContentIR2Raw
+}
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Error: npm install failed">
+    **Cause:** Package version doesn't exist or has install errors.
+
+    **Solution:**
+    - Check package name/version on npmjs.com
+    - View error in package `error_log` field in database:
+      ```js
+      db.packages.find({ "error_log.has_error": true })
+      ```
+    - The pipeline continues with remaining packages
+  </Accordion>
+
+  <Accordion title="Error: Metro bundling failed">
+    **Cause:** Package has missing peer dependencies or incompatible RN version.
+
+    **Solution:**
+    - Check `package.json` `peerDependencies`
+    - Some packages only work with specific RN versions
+    - Error is logged; pipeline continues
+  </Accordion>
+
+  <Accordion title="Error: Hermes compilation failed">
+    **Cause:** Invalid JavaScript bundle or Hermes compiler crash.
+
+    **Solution:**
+    - Check Metro bundle output: `pipeline/react-natives/rnXXX/package_out_*.js`
+    - Verify Hermes compiler: `node_modules/react-native/sdks/hermesc/osx-bin/hermesc -version`
+    - Some packages produce invalid bundles (logged as errors)
+  </Accordion>
+
+  <Accordion title="Pipeline is very slow">
+    **Causes:**
+    - Each package requires: npm install → Metro bundle → Hermes compile
+    - Processing 100 packages × 11 RN versions = 1,100 pipeline runs
+
+    **Solutions:**
+    - Reduce RN version count (edit `pipeline/react-natives/` to keep only needed versions)
+    - Process in batches (edit `react-native-directory-packages.json`)
+    - Increase semaphore limit (edit `maintainDatabase.go:187` to allow more parallel RN versions)
+  </Accordion>
+
+  <Accordion title="MongoDB disk space issues">
+    **Cause:** Each function stores 3 hashes + 3 raw IR strings.
+
+    **Solution:**
+    - Use compression: `mongod --wiredTigerCollectionBlockCompressor=zstd`
+    - Create indexes on frequently queried fields:
+      ```js
+      db.hashes.createIndex({ "package_id": 1, "react_native_version": 1 })
+      db.hashes.createIndex({ "hash.structural_hash": 1 })
+      db.hashes.createIndex({ "hash.content_ir1_hash": 1 })
+      ```
+    - Consider storing only vulnerable packages in `hashes_ghsa`
+  </Accordion>
+</AccordionGroup>
+
+## Advanced Usage
+
+### Processing a Single Package
+
+For testing, process just one package version:
+
+```bash
+# Edit react-native-directory-packages.json to contain one package
+hermes-decompiler maintain-database -p
+```
+
+### Updating Security Advisories
+
+Fetch and store GitHub Security Advisories for known packages:
+
+```bash
+hermes-decompiler maintain-database -s
+```
+
+This queries the GitHub GraphQL API for advisories affecting packages in `react-native-directory-packages.json` (requires `GITHUB_TOKEN` in `.env`).
+
+### Downloading All Advisories
+
+Fetch all npm security advisories from GitHub:
+
+```bash
+hermes-decompiler maintain-database -g
+```
+
+This creates `security-advisories-packages.json` with all vulnerable package versions, ready for processing with `-p -c`.
+
+## Optimizing Performance
+
+### Database Batcher
+
+The pipeline uses batched writes (from `pkg/pipeline/batcher.go`):
+
+```go
+batcher := NewDatabaseBatcher(100, "0.75")  // Batch size: 100
+defer batcher.Flush()
+
+batcher.AddPackage(pkg)
+batcher.AddPackageHash(pkgHash)
+// Writes happen automatically every 100 operations
+```
+
+To adjust batch size, edit `pkg/pipeline/rnprocessor.go:34`.
+
+### Package Grouping
+
+Packages are grouped by name to reduce npm operations (from `pkg/pipeline/packages.go:62`):
+
+```go
+// Instead of: install A@1.0 → uninstall → install A@2.0
+// Does: install A@1.0 → process → install A@2.0 → process
+packageGroups := GroupPackagesByName(packages)
+```
+
+## Next Steps
+
+- [Analyze apps](/guides/analyzing-apps) using your database
+- [Configure environment variables](/guides/configuration)
+- [Generate opcodes](/guides/opcode-generation) for new Hermes versions

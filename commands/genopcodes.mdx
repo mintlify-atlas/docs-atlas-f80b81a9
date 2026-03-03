@@ -1,0 +1,308 @@
+---
+title: "genopcodes"
+description: "Generate Go opcode definitions from Hermes bytecode specification files"
+---
+
+The `genopcodes` command generates Go source code for Hermes bytecode opcode definitions from `.def` files in the Hermes source repository. This is used to add support for new Hermes bytecode versions.
+
+## Usage
+
+```bash
+hedis genopcodes [flags]
+```
+
+## Flags
+
+<ParamField path="--update" type="boolean" default="false">
+  Download the latest opcode definition files from the Hermes repository before generating Go code.
+  
+  When enabled, this runs the download script to fetch bytecode definition files for all supported Hermes versions.
+</ParamField>
+
+## Examples
+
+### Generate Opcodes from Existing Definitions
+
+Generate Go opcode files from previously downloaded `.def` files:
+
+```bash
+hedis genopcodes
+```
+
+**What it does:**
+- Reads `.def` files from `pkg/hbc/types/opcodes/bcvXX/` directories
+- Parses opcode definitions, operand types, and instruction formats
+- Generates type-safe Go structs and constants
+- Writes to `pkg/hbc/types/opcodes/bcvXX/generated.go`
+
+### Download and Generate
+
+Fetch the latest Hermes definitions and generate Go code:
+
+```bash
+hedis genopcodes --update
+```
+
+**Workflow:**
+1. Runs `pkg/utils/download_all.sh` to fetch `.def` files from Hermes GitHub releases
+2. Downloads definitions for all supported bytecode versions (v61-v96)
+3. Generates Go opcode files for each version
+
+## How It Works
+
+### Step 1: Download Hermes Definitions (with `--update`)
+
+The download script fetches bytecode definition files:
+
+```bash
+sh pkg/utils/download_all.sh
+```
+
+This downloads files like:
+- `BytecodeList.def` - Opcode definitions
+- `BytecodeFileFormat.h` - File format constants
+- Version-specific operand definitions
+
+Definitions are stored in:
+```
+pkg/hbc/types/opcodes/
+├── bcv61/
+│   └── BytecodeList.def
+├── bcv84/
+│   └── BytecodeList.def
+├── bcv94/
+│   └── BytecodeList.def
+└── ...
+```
+
+### Step 2: Parse Definition Files
+
+The generator parses `.def` files which contain macro definitions like:
+
+```c
+DEFINE_OPCODE_0(Unreachable)
+DEFINE_OPCODE_1(NewObjectWithBuffer, Reg8)
+DEFINE_OPCODE_2(LoadConstUndefined, Reg8, UInt8)
+DEFINE_OPCODE_3(Mov, Reg8, Reg8, UInt8)
+```
+
+### Step 3: Generate Go Code
+
+For each opcode, generates:
+
+**Opcode constants:**
+```go
+const (
+    OpcodeUnreachable           = 0x00
+    OpcodeNewObjectWithBuffer   = 0x01
+    OpcodeLoadConstUndefined    = 0x02
+    OpcodeMov                   = 0x03
+)
+```
+
+**Instruction definitions:**
+```go
+var BytecodeInstructions = []Instruction{
+    {Opcode: 0x00, Name: "Unreachable", OperandTypes: []OperandType{}},
+    {Opcode: 0x01, Name: "NewObjectWithBuffer", OperandTypes: []OperandType{OperandTypeReg8}},
+    {Opcode: 0x02, Name: "LoadConstUndefined", OperandTypes: []OperandType{OperandTypeReg8, OperandTypeUInt8}},
+}
+```
+
+**Operand type definitions:**
+```go
+type OperandType int
+
+const (
+    OperandTypeAddr8  OperandType = iota
+    OperandTypeAddr32
+    OperandTypeReg8
+    OperandTypeReg32
+    OperandTypeUInt8
+    OperandTypeUInt16
+    OperandTypeUInt32
+    // ...
+)
+```
+
+## Adding Support for a New Hermes Version
+
+When a new Hermes version is released:
+
+### 1. Download Definitions
+
+Run the download script or manually fetch the `.def` file:
+
+```bash
+sh pkg/utils/download_all.sh
+```
+
+Or manually:
+```bash
+mkdir -p pkg/hbc/types/opcodes/bcv97
+curl -o pkg/hbc/types/opcodes/bcv97/BytecodeList.def \
+  https://raw.githubusercontent.com/facebook/hermes/v0.12.0/include/hermes/BCGen/HBC/BytecodeList.def
+```
+
+### 2. Generate Go Code
+
+Run the generator:
+
+```bash
+hedis genopcodes
+```
+
+### 3. Register the Parser
+
+Add the new version to `pkg/hbc/bytecode_parser.go` in the `GetParser` method:
+
+```go
+func GetParser(version uint32) (BytecodeParser, error) {
+    switch version {
+    // ... existing versions ...
+    case 97:
+        return &BytecodeParserV97{}, nil
+    default:
+        return nil, fmt.Errorf("unsupported bytecode version: %d", version)
+    }
+}
+```
+
+### 4. Implement the Parser
+
+Create `pkg/hbc/bytecode_parser_v97.go`:
+
+```go
+package hbc
+
+import "hermes-decompiler/pkg/hbc/types/opcodes/bcv97"
+
+type BytecodeParserV97 struct{}
+
+func (p *BytecodeParserV97) ParseInstruction(bytecode []byte, offset int) (*ParsedInstruction, error) {
+    // Implementation using bcv97.BytecodeInstructions
+}
+```
+
+### 5. Test
+
+Test the new parser with an HBC file compiled with the new Hermes version:
+
+```bash
+hedis disassemble -i test-v97.bundle -o output.txt
+```
+
+## Output Structure
+
+The generator creates one `generated.go` file per bytecode version:
+
+```
+pkg/hbc/types/opcodes/
+├── bcv61/
+│   ├── BytecodeList.def    # Source definition
+│   └── generated.go        # Generated Go code
+├── bcv84/
+│   ├── BytecodeList.def
+│   └── generated.go
+├── bcv94/
+│   ├── BytecodeList.def
+│   └── generated.go
+└── ...
+```
+
+Each `generated.go` contains:
+- Opcode constants
+- Instruction definitions with operand types
+- Operand size calculations
+- Instruction lookup tables
+
+## Common Use Cases
+
+### Update All Opcodes
+
+Refresh all opcode definitions from upstream Hermes:
+
+```bash
+hedis genopcodes --update
+```
+
+### Regenerate After Manual Edit
+
+If you manually edit a `.def` file:
+
+```bash
+hedis genopcodes
+```
+
+### Add New Bytecode Version
+
+When Hermes releases a new version:
+
+<CodeGroup>
+```bash Step 1: Download
+sh pkg/utils/download_all.sh
+```
+
+```bash Step 2: Generate
+hedis genopcodes
+```
+
+```bash Step 3: Test
+hedis disassemble -i new-version.bundle -o test.txt
+```
+</CodeGroup>
+
+## Supported Bytecode Versions
+
+Currently supports Hermes bytecode versions **61 through 96**:
+
+| Bytecode Version | Hermes Version | React Native Version |
+|------------------|----------------|----------------------|
+| 84               | 0.9.0          | 0.66-0.67            |
+| 90               | 0.10.0         | 0.68                 |
+| 93               | 0.11.0         | 0.69-0.70            |
+| 94               | 0.12.0         | 0.71                 |
+| 95               | 0.12.1         | 0.72                 |
+| 96               | 0.13.0         | 0.73+                |
+
+<Warning>
+  Bytecode versions are **not** the same as Hermes versions. Each Hermes release may bump the bytecode version, and different React Native versions bundle different Hermes versions.
+</Warning>
+
+## Notes
+
+- The generator is idempotent - running it multiple times produces the same output
+- Generated files should not be manually edited (they'll be overwritten)
+- The download script requires `curl` and internet access
+- Definition files are sourced from the official Hermes GitHub repository
+- Each bytecode version may have different opcodes, operand types, and instruction formats
+
+## Troubleshooting
+
+### "Failed to download definitions"
+
+Check network connectivity and GitHub availability:
+
+```bash
+curl -I https://raw.githubusercontent.com/facebook/hermes/main/include/hermes/BCGen/HBC/BytecodeList.def
+```
+
+### "Parse error in definition file"
+
+Definition files must follow the Hermes macro format. If you manually created a `.def` file, ensure it matches the expected structure:
+
+```c
+DEFINE_OPCODE_N(OpcodeName, Operand1Type, Operand2Type, ...)
+```
+
+### "Generated file missing"
+
+Ensure the output directory exists:
+
+```bash
+mkdir -p pkg/hbc/types/opcodes/bcvXX
+```
+
+### "Unsupported bytecode version"
+
+After generating opcodes, you must register the parser in `bytecode_parser.go` (see "Adding Support for a New Hermes Version" above).

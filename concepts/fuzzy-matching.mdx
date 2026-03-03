@@ -1,0 +1,238 @@
+---
+title: Fuzzy Matching
+description: Levenshtein distance and confidence thresholds for detecting modified vulnerable code
+---
+
+## Overview
+
+Fuzzy matching in Hedis detects **modified or obfuscated versions** of vulnerable functions that would not match via exact hash comparison. It uses **Levenshtein distance** to measure string similarity between IR representations.
+
+## Why Fuzzy Matching?
+
+Exact hash matching (SHA256) requires identical IR strings. Real-world scenarios that break exact matching:
+
+- **Minification** — Variable names shortened or removed
+- **Bundling optimizations** — Dead code elimination, function inlining
+- **Compiler differences** — Different Hermes versions may generate slightly different bytecode
+- **Intentional obfuscation** — String splitting, encoding, or identifier mangling
+- **Partial patches** — Developers manually fix part of a vulnerability without updating the package
+
+Fuzzy matching catches these cases by measuring **how similar** two IR strings are, not just whether they're identical.
+
+<Info>
+Fuzzy matching is only performed when exact matching fails. Exact matches are always preferred for performance and precision.
+</Info>
+
+## Levenshtein Distance
+
+The **Levenshtein distance** is the minimum number of single-character edits (insertions, deletions, substitutions) needed to transform one string into another.
+
+### Implementation
+
+From `pkg/cmd/analyze.go:260`:
+
+```go
+func levenshteinDistance(s1, s2 string) int {
+    if len(s1) == 0 { return len(s2) }
+    if len(s2) == 0 { return len(s1) }
+    
+    // Create dynamic programming matrix
+    matrix := make([][]int, len(s1)+1)
+    for i := range matrix {
+        matrix[i] = make([]int, len(s2)+1)
+    }
+    
+    // Initialize first row and column
+    for i := 0; i <= len(s1); i++ { matrix[i][0] = i }
+    for j := 0; j <= len(s2); j++ { matrix[0][j] = j }
+    
+    // Fill matrix using dynamic programming
+    for i := 1; i <= len(s1); i++ {
+        for j := 1; j <= len(s2); j++ {
+            cost := 0
+            if s1[i-1] != s2[j-1] { cost = 1 }
+            
+            matrix[i][j] = min(
+                matrix[i-1][j]+1,      // deletion
+                matrix[i][j-1]+1,      // insertion
+                matrix[i-1][j-1]+cost, // substitution
+            )
+        }
+    }
+    
+    return matrix[len(s1)][len(s2)]
+}
+```
+
+### Example
+
+Comparing two structural IR strings:
+
+```
+IR1: "pc=2|LoadParam|GetById|Ret|"
+IR2: "pc=2|LoadParam|GetById|JStrictNotEqual|Ret|"
+```
+
+Levenshtein distance = **21** (insertion of "JStrictNotEqual|")
+
+## Similarity Score
+
+The raw distance is normalized to a **similarity score** between 0.0 and 1.0:
+
+```go
+func levenshteinSimilarity(s1, s2 string) float64 {
+    if len(s1) == 0 && len(s2) == 0 { return 1.0 }
+    if len(s1) == 0 || len(s2) == 0 { return 0.0 }
+    
+    distance := levenshteinDistance(s1, s2)
+    maxLen := max(len(s1), len(s2))
+    return 1.0 - (float64(distance) / float64(maxLen))
+}
+```
+
+**Interpretation:**
+- `1.0` = Identical strings (0 edits needed)
+- `0.8` = 80% similar (20% of characters need to change)
+- `0.5` = 50% similar
+- `0.0` = Completely different strings
+
+## Confidence Thresholds
+
+Hedis uses a **configurable confidence threshold** to determine when a fuzzy match is significant:
+
+```bash
+hedis analyze --hbc-file app.hbc \
+  --fuzzy-matching \
+  --confidence-threshold 0.8
+```
+
+### Default: 0.8 (80% similarity)
+
+This threshold balances precision and recall:
+
+- **Higher threshold (0.9-0.95)** — Fewer false positives, may miss heavily modified code
+- **Lower threshold (0.6-0.7)** — More detections, increased false positive rate
+- **Recommended: 0.8** — Good balance for most real-world scenarios
+
+<Tip>
+For security-critical analysis, start with 0.8 and manually review fuzzy matches. For rapid screening, use 0.7 to cast a wider net.
+</Tip>
+
+## Performance Optimizations
+
+### 1. Length-Based Pre-Filtering
+
+Comparing strings with drastically different lengths is computationally expensive and unlikely to yield matches. Hedis uses a **length tolerance filter**:
+
+```go
+func isLengthCompatible(s1, s2 string, tolerance float64) bool {
+    len1, len2 := float64(len(s1)), float64(len(s2))
+    minLen, maxLen := len1, len2
+    if len2 < len1 { minLen, maxLen = len2, len1 }
+    
+    // Check if difference is within tolerance
+    return (maxLen - minLen) / maxLen <= tolerance
+}
+```
+
+**Default tolerance: 0.2 (±20%)**
+
+Example:
+- IR string of length 100 → Only compare against strings in range [80, 125]
+- Strings with length < 30 → Skip entirely (too short for reliable matching)
+
+### 2. Document Limits
+
+To prevent exhaustive database scans, fuzzy matching limits the number of candidate documents:
+
+```bash
+--max-fuzzy-docs 5000  # Default: check up to 5000 documents per input IR
+```
+
+From `pkg/cmd/analyze.go:87`:
+
+```go
+maxFuzzyDocs    int     = 5000  // Maximum documents to check
+lengthTolerance float64 = 0.2   // ±20% length tolerance
+```
+
+### 3. Parallelized Comparison
+
+When comparing package contents, fuzzy matching runs in parallel across the three hash types:
+
+```go
+var wg sync.WaitGroup
+wg.Add(3)
+
+go fuzzyMatch(packageContent.StructuralIRs, 
+              appBundleContent.StructuralIRs, 
+              structuralExactIndices, 
+              results.Structural, &wg)
+
+go fuzzyMatch(packageContent.ContentIR1s, 
+              appBundleContent.ContentIR1s, 
+              contentIR1ExactIndices, 
+              results.ContentIR1, &wg)
+
+go fuzzyMatch(packageContent.ContentIR2s, 
+              appBundleContent.ContentIR2s, 
+              contentIR2ExactIndices, 
+              results.ContentIR2, &wg)
+
+wg.Wait()
+```
+
+## Match Results
+
+Fuzzy matches include confidence scores and matched strings:
+
+```go
+type SimilarityMatch struct {
+    HashMatch
+    Confidence    float64 `json:"confidence"`     // 0.0 to 1.0
+    MatchType     string  `json:"match_type"`     // "exact" or "fuzzy"
+    MatchedString string  `json:"matched_string"` // Database IR string
+    InputString   string  `json:"input_string"`   // Input IR string
+}
+```
+
+### Example Output
+
+```
+Fuzzy IR matches (≥0.80 similarity):
+  • Structural : 142/385 (36.88%)
+  • Content IR1: 28/156 (17.95%)
+  • Content IR2: 89/201 (44.28%)
+  ⇒ Overall    : 259/742 (34.91%)
+```
+
+Each match shows:
+- Number of fuzzy matches above threshold
+- Number of eligible functions (> 30 chars, not exact matched)
+- Percentage of eligible functions matched
+
+<Note>
+Exact matches are excluded from fuzzy matching to avoid double-counting. Only functions that failed exact matching are considered for fuzzy comparison.
+</Note>
+
+## Trigram Shingling (Advanced)
+
+For Content IR1 and IR2, Hedis also generates **trigram shingles** (3-character substrings) during tokenization:
+
+```go
+if len(richDataValue) >= 3 {
+    for i := 0; i < len(richDataValue)-3; i++ {
+        tokens = append(tokens, richDataValue[i:i+3])
+    }
+}
+```
+
+Example: `"document_picker"` → `["doc", "ocu", "cum", "ume", "men", "ent", "nt_", "t_p", "_pi", "pic", "ick", "cke", "ker"]`
+
+This enables partial string matching when only fragments of identifiers or literals are preserved.
+
+## Related Sections
+
+- [Fingerprinting](/concepts/fingerprinting) — The three hash types used in matching
+- [Hermes Bytecode](/concepts/hermes-bytecode) — Understanding the bytecode structure
+- [Database Schema](/concepts/database-schema) — MongoDB collections storing fingerprints

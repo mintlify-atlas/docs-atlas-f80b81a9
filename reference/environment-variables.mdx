@@ -1,0 +1,317 @@
+---
+title: Environment Variables
+description: Required and optional environment variables for Hedis
+---
+
+Hedis uses environment variables for database connection, platform configuration, and external API access. Variables are auto-loaded from a `.env` file in `go/hermes-decompiler/` via `godotenv`.
+
+## Configuration File
+
+Create a `.env` file in the `go/hermes-decompiler/` directory:
+
+```bash
+cp .env.example .env
+```
+
+Edit the file with your configuration:
+
+```bash .env
+MONGO_CONNECTION_STRING=mongodb://localhost:27017
+MONGO_DB_NAME=hedis
+OS_HERMES=linux64-bin
+GITHUB_TOKEN=ghp_your_token_here
+```
+
+## Required Variables
+
+### MONGO_CONNECTION_STRING
+
+<ResponseField name="MONGO_CONNECTION_STRING" type="string" required>
+  MongoDB connection URI for fingerprint database storage.
+</ResponseField>
+
+**Format:**
+
+```
+mongodb://[username:password@]host[:port][/database][?options]
+```
+
+**Examples:**
+
+```bash
+# Local MongoDB
+MONGO_CONNECTION_STRING=mongodb://localhost:27017
+
+# MongoDB Atlas
+MONGO_CONNECTION_STRING=mongodb+srv://user:pass@cluster.mongodb.net
+
+# With authentication
+MONGO_CONNECTION_STRING=mongodb://admin:password@localhost:27017/hedis?authSource=admin
+```
+
+**Used in:**
+- `pkg/database/main.go:16` - Database initialization
+- All commands that access the database (`analyze`, `maintain-database`, `packages`)
+
+**Behavior if unset:**
+
+Program exits with error:
+
+```
+MONGO_CONNECTION_STRING is not set
+exit status 1
+```
+
+Source: `pkg/database/main.go:18`
+
+### OS_HERMES
+
+<ResponseField name="OS_HERMES" type="enum" required>
+  Hermes compiler binary platform identifier.
+</ResponseField>
+
+**Allowed values:**
+
+| Value | Platform | Compiler Path |
+|-------|----------|---------------|
+| `osx-bin` | macOS (Intel/ARM) | `node_modules/hermes-engine/osx-bin/hermesc` |
+| `linux64-bin` | Linux x86_64 | `node_modules/hermes-engine/linux64-bin/hermesc` |
+
+**Example:**
+
+```bash
+# macOS
+OS_HERMES=osx-bin
+
+# Linux
+OS_HERMES=linux64-bin
+```
+
+**Used in:**
+- `pkg/cmd/packages.go:33` - Package processing pipeline
+- `pkg/cmd/maintainDatabase.go:44` - Database maintenance operations
+
+**Behavior if unset:**
+
+Compiler path resolution fails, causing package processing to error.
+
+## Optional Variables
+
+### MONGO_DB_NAME
+
+<ResponseField name="MONGO_DB_NAME" type="string" default="hedis">
+  MongoDB database name for storing fingerprints.
+</ResponseField>
+
+**Default:** `hedis`
+
+**Example:**
+
+```bash
+# Use default database
+MONGO_DB_NAME=hedis
+
+# Use custom database name
+MONGO_DB_NAME=hedis_production
+
+# Use clean database for packages command
+MONGO_DB_NAME=clean
+```
+
+**Used in:**
+- `pkg/database/main.go:22` - Database initialization
+- All database operations
+
+**Special case:**
+
+The `packages` command uses database name `clean` for isolated package processing.
+
+### GITHUB_TOKEN
+
+<ResponseField name="GITHUB_TOKEN" type="string">
+  GitHub Personal Access Token for Security Advisory API queries.
+</ResponseField>
+
+**Required for:**
+- `maintain-database -g` - Download GitHub Security Advisories
+- `maintain-database -s` - Update security advisories
+
+**Token Permissions:**
+
+The token requires the following scope:
+- `public_repo` or `repo` - Read access to security advisories
+
+**Generate a token:**
+
+1. Go to [GitHub Settings > Developer settings > Personal access tokens](https://github.com/settings/tokens)
+2. Click "Generate new token (classic)"
+3. Select scope: `public_repo`
+4. Copy the token (starts with `ghp_`)
+
+**Example:**
+
+```bash
+GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890
+```
+
+**Used in:**
+- `pkg/pipeline/security.go:64` - `GetGithubSecurityAdvisories()`
+- `pkg/pipeline/security.go:147` - `GetAllGithubSecurityAdvisories()`
+
+**Behavior if unset:**
+
+When required commands are run without this token:
+
+```
+GITHUB_TOKEN environment variable is not set
+```
+
+Source: `pkg/pipeline/security.go:66`, `pkg/pipeline/security.go:149`
+
+**Rate limiting:**
+
+Without a token, GitHub API requests may be rate-limited. A warning is logged:
+
+```javascript
+// In js/get-packages/index.js:63
+console.warn("GITHUB_TOKEN not set. You may face rate-limiting.");
+```
+
+## Environment Loading
+
+Environment variables are auto-loaded in `main.go`:
+
+```go
+import _ "github.com/joho/godotenv/autoload"
+```
+
+This automatically reads `.env` in the current working directory (`go/hermes-decompiler/`).
+
+## Validation
+
+Variables are validated at runtime when accessed:
+
+<CodeGroup>
+```go Database Connection
+mongoConnectionString := os.Getenv("MONGO_CONNECTION_STRING")
+if mongoConnectionString == "" {
+    utils.F.Println("MONGO_CONNECTION_STRING is not set")
+    os.Exit(1)
+}
+```
+
+```go GitHub Token
+githubToken := os.Getenv("GITHUB_TOKEN")
+if githubToken == "" {
+    return nil, fmt.Errorf("GITHUB_TOKEN environment variable is not set")
+}
+```
+
+```go Hermes Platform
+osHermes := os.Getenv("OS_HERMES")
+utils.L.Printf("OS_HERMES: %s\n", osHermes)
+```
+</CodeGroup>
+
+## Docker Configuration
+
+When running Hedis in Docker, pass environment variables via:
+
+**Using `-e` flag:**
+
+```bash
+docker run -e MONGO_CONNECTION_STRING=mongodb://host.docker.internal:27017 \
+           -e MONGO_DB_NAME=hedis \
+           -e OS_HERMES=linux64-bin \
+           hedis analyze -b bundle.hbc
+```
+
+**Using `--env-file`:**
+
+```bash
+docker run --env-file .env hedis analyze -b bundle.hbc
+```
+
+**In `docker-compose.yml`:**
+
+```yaml
+services:
+  hedis:
+    image: hedis
+    environment:
+      MONGO_CONNECTION_STRING: mongodb://mongo:27017
+      MONGO_DB_NAME: hedis
+      OS_HERMES: linux64-bin
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+```
+
+## Security Considerations
+
+<Warning>
+  Never commit `.env` files to version control. The `.gitignore` should include:
+  ```
+  .env
+  .env.local
+  .env.*.local
+  ```
+</Warning>
+
+<Warning>
+  Rotate GitHub tokens regularly and use tokens with minimal required permissions.
+</Warning>
+
+<Info>
+  For production deployments, use secret management systems (AWS Secrets Manager, HashiCorp Vault, etc.) instead of `.env` files.
+</Info>
+
+## Troubleshooting
+
+### Variable Not Loading
+
+**Symptom:** Environment variable returns empty string
+
+**Causes:**
+1. `.env` file not in `go/hermes-decompiler/` directory
+2. Incorrect file permissions
+3. Variable not exported in shell
+
+**Solution:**
+
+```bash
+# Check .env file location
+ls -la go/hermes-decompiler/.env
+
+# Verify file permissions
+chmod 600 go/hermes-decompiler/.env
+
+# Test variable loading
+cd go/hermes-decompiler
+go run main.go disassemble --help
+```
+
+### MongoDB Connection Failed
+
+**Symptom:** `connection failed` or `authentication failed`
+
+**Solution:**
+
+Test connection string:
+
+```bash
+mongosh "$MONGO_CONNECTION_STRING"
+```
+
+See [Troubleshooting](/development/troubleshooting#mongodb-connection-errors) for detailed debugging.
+
+### GitHub API Rate Limiting
+
+**Symptom:** `403 Forbidden` or rate limit errors
+
+**Solution:**
+
+Set `GITHUB_TOKEN` or wait for rate limit reset:
+
+```bash
+curl -H "Authorization: Bearer $GITHUB_TOKEN" \
+  https://api.github.com/rate_limit
+```

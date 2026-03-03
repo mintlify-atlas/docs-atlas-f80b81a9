@@ -1,0 +1,190 @@
+---
+title: Fingerprinting
+description: How Hedis generates three complementary hash types from Hermes bytecode functions
+---
+
+## Overview
+
+Hedis generates **three types of hashes** for each function in a Hermes bytecode file. These hashes enable both exact matching (via SHA256) and approximate similarity matching (via MinHash/LSH) to detect vulnerable packages in React Native apps.
+
+## The Three Hash Types
+
+### 1. Structural Hash
+
+Captures the **control-flow shape** of the function by hashing its opcode sequence.
+
+**What it includes:**
+- Parameter count prefix: `pc=N|`
+- Opcode mnemonic sequence: `LoadParam|GetById|Ret|`
+- Opcode bigrams for fuzzy matching: `LoadParam→GetById`, `GetById→Ret`
+
+**What it excludes:**
+- Operand values (register numbers, constants)
+- String literals and identifiers
+- Object references
+
+**Example IR:**
+```
+pc=2|LoadParam|LoadParam|GetById|JStrictNotEqual|JmpTrue|LoadConstString|Ret|
+```
+
+**Use case:** Detects structurally similar functions even when variable names or string content differs.
+
+<Info>
+Structural hashes are resilient to minification and variable renaming, making them ideal for detecting obfuscated or bundled code.
+</Info>
+
+### 2. Content IR1 Hash (Non-Identifier Strings)
+
+Captures **string literal content** that is not an identifier.
+
+**What it includes:**
+- String literals that are NOT identifiers (e.g. `"Error: Invalid input"`, `"https://api.example.com"`)
+- All values lowercased and sorted alphabetically
+- Trigram shingles (3-character substrings) for fuzzy matching
+
+**What it excludes:**
+- Identifier names (variable/property names)
+- Object references
+- Opcode structure
+
+**Example IR:**
+```
+ document_picker_canceled|invalid file type|pick a file|unsupported format
+```
+
+**Use case:** Matches functions by their error messages, API endpoints, user-facing strings, or unique string constants.
+
+<Tip>
+Content IR1 is particularly effective for detecting vulnerability-specific error messages or hardcoded secrets that appear in vulnerable code paths.
+</Tip>
+
+### 3. Content IR2 Hash (Identifiers and Objects)
+
+Captures **identifier names and object references** used by the function.
+
+**What it includes:**
+- Identifier strings (variable names, property names)
+- Object references (object literal keys/values)
+- All values lowercased and sorted alphabetically  
+- Trigram shingles for fuzzy matching
+
+**What it excludes:**
+- Non-identifier string literals
+- Opcode structure
+
+**Example IR:**
+```
+abortcontroller|document|filesize|getfile|mimetype|oncancel|picksingle|result|type|uri
+```
+
+**Use case:** Matches functions by their API surface, property access patterns, or distinctive identifier combinations.
+
+## How Hashes Are Computed
+
+From the source code at `pkg/analyzer/compute.go:27`:
+
+```go
+func (minHasher *MinHasher) ComputeFunctionSignature(fo *types.FunctionObject) *FunctionSignature {
+    // 1. Generate three IR strings from the function
+    structuralIR, contentIR1, contentIR2 := fo.ToIR()
+    
+    // 2. Compute SHA256 exact-match hashes (min length: 10 chars)
+    var structuralHash, contentIR1Hash, contentIR2Hash string
+    if len(structuralIR) >= 10 {
+        structuralHash = computeSHA256Hash(structuralIR)
+    }
+    if len(contentIR1) >= 10 {
+        contentIR1Hash = computeSHA256Hash(contentIR1)
+    }
+    if len(contentIR2) >= 10 {
+        contentIR2Hash = computeSHA256Hash(contentIR2)
+    }
+    
+    // 3. Tokenize for fuzzy matching
+    structuralTokens := fo.TokenizeStructuralIR()        // Bigrams
+    nonIdentifierTokens, identifierTokens := fo.TokenizeContentIRs() // + Trigrams
+    
+    // 4. Compute MinHash signatures for approximate matching
+    structuralSig := minHasher.ComputeSignature(structuralTokens)
+    contentIR1Sig := minHasher.ComputeSignature(nonIdentifierTokens)
+    contentIR2Sig := minHasher.ComputeSignature(identifierTokens)
+    
+    // 5. Compute combined signature and LSH bands
+    combinedTokens := combine(structuralTokens, nonIdentifierTokens, identifierTokens)
+    combinedSig := minHasher.ComputeSignature(combinedTokens)
+    lshBands := minHasher.ComputeLSHBands(combinedSig)
+    
+    return &FunctionSignature{...}
+}
+```
+
+## Storage Format
+
+Hashes are stored in MongoDB with both exact-match and fuzzy-match representations:
+
+```go
+type Hash struct {
+    RelativeFunctionIndex int    `bson:"relative_function_index"`
+    
+    // Raw IR strings
+    StructuralRaw         string `bson:"structural_raw"`
+    ContentIR1Raw         string `bson:"content_ir1_raw,omitempty"`
+    ContentIR2Raw         string `bson:"content_ir2_raw,omitempty"`
+    
+    // SHA256 hex digests for exact matching
+    StructuralHash        string `bson:"structural_hash"`
+    ContentIR1Hash        string `bson:"content_ir1_hash,omitempty"`
+    ContentIR2Hash        string `bson:"content_ir2_hash,omitempty"`
+}
+```
+
+## Complementary Matching Strategy
+
+The three hash types work together to maximize detection:
+
+| Hash Type | Detects | Resilient To | Vulnerable To |
+|-----------|---------|--------------|---------------|
+| **Structural** | Control flow patterns | Renaming, string changes | Code restructuring, compiler optimization |
+| **Content IR1** | Unique string literals | Code reordering | String obfuscation, encryption |
+| **Content IR2** | API usage patterns | Code reordering | Identifier renaming, obfuscation |
+
+### Example Scenario
+
+A vulnerable function in `react-native-document-picker@8.0.0`:
+
+```javascript
+function pickSingle(opts) {
+  if (!opts.type) {
+    throw new Error("document_picker_canceled");
+  }
+  return NativeModules.RNDocumentPicker.pick(opts);
+}
+```
+
+**Hashes generated:**
+
+1. **Structural**: Captures `LoadParam|JStrictEqual|JmpTrue|LoadConstString|Throw|GetById|Call|Ret` pattern
+2. **Content IR1**: Captures `"document_picker_canceled"` error message
+3. **Content IR2**: Captures identifiers: `opts`, `type`, `NativeModules`, `RNDocumentPicker`, `pick`
+
+If an app bundles this package:
+- Even if minified → Structural hash still matches
+- Even if identifiers renamed → Content IR1 hash matches on error string
+- If error string is changed → Structural or Content IR2 may still match
+
+<Note>
+Hedis requires at least a **10-character IR string** before computing hashes. Functions with fewer than 10 characters in a given IR will have an empty hash for that type.
+</Note>
+
+## Baseline Filtering
+
+To reduce false positives, Hedis maintains **baseline fingerprints** for each React Native version (empty app with no packages). Functions matching baseline hashes are excluded from results, as they represent framework code rather than third-party packages.
+
+See [Database Schema](/concepts/database-schema) for details on the `baselines_v3` collection.
+
+## Related Sections
+
+- [Hermes Bytecode](/concepts/hermes-bytecode) — Understanding the bytecode format
+- [Fuzzy Matching](/concepts/fuzzy-matching) — How MinHash and LSH enable approximate matching
+- [Database Schema](/concepts/database-schema) — MongoDB collections storing fingerprints

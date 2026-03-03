@@ -1,0 +1,110 @@
+---
+title: Research Methodology
+description: Technical approach and pipeline design
+---
+
+## Overview
+
+The research methodology introduces a novel static analysis pipeline for detecting vulnerable JavaScript packages within production React Native applications. The approach operates entirely on compiled bytecode, requiring no access to source code or build artifacts.
+
+## Pipeline Architecture
+
+The analysis pipeline consists of four primary stages:
+
+### 1. Reference Database Construction
+
+The first stage builds a comprehensive database of npm package fingerprints:
+
+- **Package selection**: npm packages are identified through GitHub Security Advisories and dependency analysis
+- **Multi-version compilation**: Each package is compiled across 11 React Native environments (covering different Hermes versions and React Native releases)
+- **Bytecode extraction**: Metro bundler produces JavaScript bundles, which are compiled to Hermes bytecode (`.hbc` files)
+- **Function fingerprinting**: Each function in the bytecode is disassembled and hashed using multiple techniques
+
+<Note>
+The pipeline processes packages in parallel across all React Native versions, with batched database writes for efficiency. Progress is persisted to enable resumption after interruptions.
+</Note>
+
+### 2. Baseline Generation
+
+To filter out React Native framework functions and reduce false positives:
+
+- **Empty app creation**: A minimal React Native application is created for each supported version
+- **Framework fingerprinting**: All functions from the base framework are extracted and stored
+- **Filtering**: During analysis, framework fingerprints are excluded from results
+
+This baseline approach ensures that only application-specific and third-party dependencies are flagged.
+
+### 3. Target Application Processing
+
+Real-world applications are obtained and processed:
+
+- **IPA extraction**: iOS application archives (`.ipa` files) are downloaded from the App Store
+- **Bytecode location**: The Hermes bytecode bundle is extracted from the app package (typically in the main application bundle)
+- **Disassembly**: The entire application bytecode is disassembled into individual functions
+- **Fingerprint generation**: The same hashing techniques used for the reference database are applied
+
+### 4. Fingerprint Matching
+
+The final stage matches application fingerprints against the reference database:
+
+#### Exact Matching
+
+Functions are matched using three complementary hash types:
+
+- **Structural Hash**: SHA256 of instruction bigrams (opcode sequences)
+- **Content IR1 Hash**: SHA256 of non-identifier strings with trigram shingling
+- **Content IR2 Hash**: SHA256 of identifiers and object references
+
+A match is confirmed when multiple hash types align, increasing confidence.
+
+#### Fuzzy Matching
+
+To handle code transformations and optimizations:
+
+- **MinHash similarity**: Locality-sensitive hashing for efficient similarity detection
+- **Levenshtein distance**: Edit distance calculation for close matches
+- **Length-based filtering**: Pre-filtering with ±20% tolerance reduces comparison space
+- **Confidence thresholds**: Configurable threshold (default 0.8) determines match acceptance
+
+## Technical Implementation
+
+### Hermes Bytecode Support
+
+The implementation supports **30 bytecode versions** (v61–v96):
+
+- Each version has auto-generated opcode definitions extracted from the official Hermes repository
+- Version-specific instruction tables enable correct parsing across different Hermes releases
+- Parser fallback strategy selects the highest compatible version when exact matches are unavailable
+
+### Normalization Levels
+
+Three levels of intermediate representation (IR) enable flexible matching:
+
+- **IR0**: Raw bytecode instructions (no normalization)
+- **IR1**: String literals preserved, identifiers normalized
+- **IR2**: Full normalization including identifier and object reference removal
+
+Higher normalization levels improve resilience to minification and code transformations while potentially reducing specificity.
+
+### Database Design
+
+MongoDB stores three primary collections:
+
+- **`packages`**: npm package metadata (name, version, advisory IDs)
+- **`hashes`** / **`hashes_ghsa`**: Function fingerprints per package per React Native version
+- **`baselines_v3`**: Framework function fingerprints for filtering
+
+Batched writes (100 operations per batch) optimize database performance during bulk processing.
+
+## Scalability Considerations
+
+The pipeline is designed for large-scale analysis:
+
+- **Parallel processing**: Goroutines with semaphore-based concurrency control
+- **Resume capability**: JSON-based progress tracking (`pipeline_progress.json`)
+- **Resource management**: Automatic cleanup of temporary build artifacts
+- **Efficient matching**: Length-based pre-filtering and MinHash indexing reduce computational overhead
+
+## Validation Approach
+
+The methodology was validated through systematic testing on applications with known dependency compositions. See [Validation](/research/validation) for detailed results.

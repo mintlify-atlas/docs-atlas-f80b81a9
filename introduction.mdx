@@ -1,0 +1,104 @@
+---
+title: Introduction
+description: Analyze React Native mobile applications for supply chain security risks
+---
+
+<img
+  className="block dark:hidden"
+  src="/images/hero-light.svg"
+  alt="Hero Light"
+/>
+<img
+  className="hidden dark:block"
+  src="/images/hero-dark.svg"
+  alt="Hero Dark"
+/>
+
+## What is Hedis?
+
+Hedis (Hermes Decompiler/Disassembler) is a Go CLI tool for analyzing React Native mobile applications for supply chain security risks. It decompiles Hermes bytecode (`.hbc` files), extracts function fingerprints, and matches them against a database of known vulnerable npm packages.
+
+With Hedis, you can identify whether a React Native app includes dependencies with known vulnerabilities—even when you only have access to the compiled application bundle.
+
+## How it works
+
+Hedis uses a novel static analysis pipeline that works in three stages:
+
+1. **Decompile** — Parse Hermes bytecode files to extract function definitions and instruction sequences
+2. **Fingerprint** — Generate three complementary hash types per function: structural (opcode sequences), content IR1 (string literals), and content IR2 (identifiers)
+3. **Match** — Query a reference database of npm package fingerprints to identify vulnerable dependencies
+
+The approach supports 30 Hermes bytecode versions (v61–v96) covering React Native releases from v0.69 through v0.79.
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card
+    title="Bytecode decompilation"
+    icon="file-code"
+    href="/commands/disassemble"
+  >
+    Disassemble Hermes bytecode files to human-readable output with support for 30 bytecode versions
+  </Card>
+  <Card
+    title="Vulnerability detection"
+    icon="shield-exclamation"
+    href="/commands/analyze"
+  >
+    Match app fingerprints against a database of known vulnerable npm packages with exact and fuzzy matching
+  </Card>
+  <Card
+    title="Fingerprint database"
+    icon="database"
+    href="/commands/maintain-database"
+  >
+    Build and maintain a reference database of npm package fingerprints across multiple React Native versions
+  </Card>
+  <Card
+    title="Research-backed"
+    icon="book"
+    href="https://doi.org/10.26083/tuprints-00031438"
+  >
+    Based on bachelor thesis research at TU Darmstadt validating the approach on production apps
+  </Card>
+</CardGroup>
+
+## Supported formats
+
+- **Hermes bytecode versions:** v61–v96 (30 versions)
+- **Input formats:** `.hbc` (Hermes bytecode), `.ipa` (iOS app archives)
+- **React Native versions:** 0.69–0.79
+
+## Use cases
+
+- **Security auditing** — Identify vulnerable dependencies in compiled React Native applications
+- **Supply chain analysis** — Verify which npm packages are included in production mobile apps
+- **Compliance** — Check if applications contain packages with known security advisories
+- **Research** — Analyze bytecode structure and JavaScript compilation patterns
+
+## Research foundation
+
+Hedis was developed as part of a bachelor thesis at TU Darmstadt titled **"Evaluating Dependency Vulnerabilities in React Native Applications"**. The approach has been validated on both open-source apps (Rainbow, Mattermost) and production apps (Discord, Microsoft Outlook).
+
+<Note>
+  Read the full thesis: [doi.org/10.26083/tuprints-00031438](https://doi.org/10.26083/tuprints-00031438)
+</Note>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card
+    title="Installation"
+    icon="download"
+    href="/installation"
+  >
+    Install Go, MongoDB, and Node.js dependencies
+  </Card>
+  <Card
+    title="Quick start"
+    icon="rocket"
+    href="/quickstart"
+  >
+    Analyze your first React Native app in minutes
+  </Card>
+</CardGroup>
