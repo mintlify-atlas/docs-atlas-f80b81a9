@@ -1,0 +1,114 @@
+{
+  "projectType": "cli-tool",
+  "projectName": "Hedis",
+  "projectDescription": "A Go tool for analyzing React Native mobile applications for supply chain security risks by decompiling Hermes bytecode and matching against known vulnerable packages.",
+  "theme": "aspen",
+  "primaryColor": "#1e40af",
+  "lightColor": "#3b82f6",
+  "darkColor": "#1e3a8a",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/hermes-bytecode",
+              "concepts/fingerprinting",
+              "concepts/fuzzy-matching",
+              "concepts/database-schema"
+            ]
+          },
+          {
+            "group": "CLI Commands",
+            "pages": [
+              "commands/disassemble",
+              "commands/analyze",
+              "commands/maintain-database",
+              "commands/genopcodes",
+              "commands/packages"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/analyzing-apps",
+              "guides/building-database",
+              "guides/opcode-generation",
+              "guides/configuration"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/hbc-reader",
+              "architecture/pipeline",
+              "architecture/analyzer"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Research",
+        "groups": [
+          {
+            "group": "Academic Context",
+            "pages": [
+              "research/thesis",
+              "research/methodology",
+              "research/validation"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "API Reference",
+            "pages": [
+              "reference/bytecode-versions",
+              "reference/ir-normalization",
+              "reference/hash-types",
+              "reference/environment-variables"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "development/contributing",
+              "development/troubleshooting"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Disassemble Hermes bytecode files (v61-v96)",
+    "Extract function fingerprints with structural and content hashing",
+    "Detect vulnerable npm packages in React Native apps",
+    "Fuzzy matching with Levenshtein distance",
+    "MongoDB-based fingerprint database",
+    "Parallel pipeline processing across React Native versions",
+    "Support for iOS IPA and HBC file analysis",
+    "Automatic opcode generation from Hermes source"
+  ],
+  "publicApiSurface": [
+    "disassemble - Disassemble HBC files to human-readable output",
+    "analyze - Analyze IPA/HBC files for vulnerable packages",
+    "maintain-database - Build and update fingerprint database",
+    "genopcodes - Generate Go opcode definitions from Hermes source",
+    "packages - Package management utilities"
+  ]
+}
